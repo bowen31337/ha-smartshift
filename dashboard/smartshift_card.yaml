@@ -1,0 +1,61 @@
+type: vertical-stack
+cards:
+  - type: entities
+    title: "🔋 SmartShift — Battery Automation"
+    entities:
+      - entity: sensor.smartshift_spot_price
+        name: "⚡ Spot Price"
+        icon: mdi:lightning-bolt
+      - entity: sensor.smartshift_mode
+        name: "🎯 Current Mode"
+        icon: mdi:battery-charging
+      - entity: sensor.solar_pv_power_3
+        name: "☀️ Solar PV"
+      - entity: sensor.battery_soc
+        name: "🔋 Battery SoC"
+      - entity: sensor.battery_power_raw
+        name: "🔋 Battery Power (+dis/-chg)"
+      - entity: sensor.grid_power_raw
+        name: "⚡ Grid (+import/-export)"
+      - entity: sensor.home_load_power
+        name: "🏠 Home Load"
+
+  - type: horizontal-stack
+    cards:
+      - type: button
+        name: "⬆️ Force Discharge"
+        icon: mdi:battery-arrow-up
+        tap_action:
+          action: call-service
+          service: shell_command.smartshift_discharge
+        hold_action:
+          action: none
+      - type: button
+        name: "⬇️ Force Charge"
+        icon: mdi:battery-arrow-down
+        tap_action:
+          action: call-service
+          service: shell_command.smartshift_charge
+        hold_action:
+          action: none
+      - type: button
+        name: "🔄 Auto"
+        icon: mdi:battery-sync
+        tap_action:
+          action: call-service
+          service: shell_command.smartshift_self_consumption
+        hold_action:
+          action: none
+
+  - type: history-graph
+    title: "📈 Power History (12h)"
+    hours_to_show: 12
+    entities:
+      - entity: sensor.solar_pv_power_3
+        name: "☀️ Solar"
+      - entity: sensor.home_load_power
+        name: "🏠 Home"
+      - entity: sensor.battery_power_raw
+        name: "🔋 Battery"
+      - entity: sensor.grid_power_raw
+        name: "⚡ Grid"

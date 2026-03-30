@@ -1,0 +1,6 @@
+[project]
+name = "ha-smartshift"
+version = "1.0.0"
+description = "DIY battery automation using spot prices and Home Assistant"
+requires-python = ">=3.11"
+dependencies = []

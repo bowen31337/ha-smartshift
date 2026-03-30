@@ -1,0 +1,7 @@
+.env
+.current_state.json
+*.log
+__pycache__/
+*.pyc
+.venv/
+smartshift.log
