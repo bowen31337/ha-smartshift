@@ -1,0 +1,1178 @@
+openapi: 3.0.3
+info:
+  title: AISWEI ASW12kH-T3 Local Inverter API
+  description: |
+    Local HTTPS API for the AISWEI ASW12kH-T3 12kW hybrid solar inverter.
+    Hosted on the inverter's embedded ESP32 WiFi module (Ai-Dongle LAN/WLAN, BA1300-30).
+
+    **Connection:**
+    - Host: `10.0.0.6` (LAN IP, may vary)
+    - Protocol: HTTPS port 443 (self-signed certificate — disable SSL verification)
+    - Authentication: None (open local API)
+    - The inverter goes offline overnight (no solar) and wakes at sunrise
+
+    **Device type codes for /getdev.cgi and /getdevdata.cgi:**
+    | device | Description |
+    |--------|-------------|
+    | 1      | 404 — not found |
+    | 2      | Inverter (AC output, MPPT, temperature, PV strings) |
+    | 3      | Grid meter / CT clamp (grid power, per-phase, export/import totals) |
+    | 4      | Battery pack (charge/discharge, SoC, SoH, voltage) |
+    | 5      | Dongle info (device=5 and device=6 both return dongle/WiFi metadata) |
+    | 6      | Dongle info (same as device=5) |
+
+    **Serial numbers (this unit):**
+    - Inverter SN: `OE012K01Z2610013`
+    - Battery SN: `20030261080011`
+    - Dongle PSN: `BA100D6100C3`
+    - Dongle MAC (ETH): `88:57:21:B9:0C:80`
+    - Dongle MAC (WiFi): `88:57:21:B9:0C:83`
+
+    **Confirmed working endpoints (probed 2026-03-31):**
+    - GET /getdev.cgi?device=2 — Inverter metadata
+    - GET /getdev.cgi?device=3 — Grid meter config (mode, limits, G100 params)
+    - GET /getdev.cgi?device=4 — Battery pack static info
+    - GET /getdev.cgi?device=5 — Dongle info (same as device=6)
+    - GET /getdev.cgi?device=6 — Dongle info (same as device=5)
+    - GET /getdevdata.cgi?device=2&sn=OE012K01Z2610013 — Live inverter data
+    - GET /getdevdata.cgi?device=3 — Live meter data
+    - GET /getdevdata.cgi?device=4&sn=OE012K01Z2610013 — Live battery data
+    - GET /getdevdata.cgi?device=5 — Diesel/generator stub (all zeros)
+    - GET /getdefine.cgi — Schedule config (TOU windows, Pin/Pout limits)
+    - POST /setting.cgi — Write settings (returns error if no valid body)
+
+    **404 endpoints (confirmed not implemented):**
+    getrundata, getlog, getalarm, getversion, gettime, getnet, getwifi,
+    getsched, getschedule, getbattery, getinv, getparam, getstatus,
+    getinfo, getconfig, getdata, getmeter, getdevdata?device=1, getdevdata?device=6
+
+  version: "1.1.0"
+  contact:
+    name: Bowen Li
+    email: bowen31337@outlook.com
+
+servers:
+  - url: https://10.0.0.6
+    description: Local inverter (LAN only, self-signed cert)
+
+paths:
+
+  /getdev.cgi:
+    get:
+      summary: Get device metadata and static configuration
+      description: |
+        Returns static device info. Response schema varies by `device` parameter.
+        - device=2: inverter model, SN, firmware versions, battery topology
+        - device=3: grid meter mode, G100 parameters, power limit config
+        - device=4: battery static specs (capacity, cell config, firmware)
+        - device=5/6: dongle/WiFi module info (both return same data)
+        - device=1: 404 not found
+      parameters:
+        - name: device
+          in: query
+          required: true
+          schema:
+            type: integer
+            enum: [2, 3, 4, 5, 6]
+          description: Device type
+      responses:
+        "200":
+          description: Device metadata (schema varies by device)
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/DeviceInfoInverter'
+                  - $ref: '#/components/schemas/DeviceInfoMeter'
+                  - $ref: '#/components/schemas/DeviceInfoBattery'
+                  - $ref: '#/components/schemas/DeviceInfoDongle'
+              examples:
+                device2:
+                  summary: device=2 (inverter)
+                  value:
+                    inv:
+                      - isn: "OE012K01Z2610013"
+                        add: 3
+                        safety: 55
+                        rate: 12000
+                        msw: "V610-05001-20.000"
+                        ssw: "V610-60015-00"
+                        tsw: "V610-11022-15"
+                        pac: 570
+                        etd: 36
+                        eto: -201
+                        err: 0
+                        cmv: "V2.1.8"
+                        mty: 13
+                        typ: 3
+                        stu: 1
+                        model: "ASW12kH-T3"
+                        Isw: "V610-50097-08.000"
+                        afci: ""
+                        battery_topo:
+                          - bat_sn: "20030261080011"
+                            bat_id: 1
+                            bat_sw_ver: "V610-90002-12"
+                        host: 0
+                    num: 1
+                device3:
+                  summary: device=3 (meter config)
+                  value:
+                    mod: 6
+                    enb: 1
+                    exp_m: 0
+                    regulate: 5
+                    enb_PF: 0
+                    target_PF: 0
+                    in_cur_g100: 630
+                    out_cur_g100: 0
+                    usage_type_g100: 0
+                    com_interruption_enable_g100: 0
+                    power_limit_mode: 0
+                    billing_method: 0
+                    abs: 0
+                    abs_offset: 0
+                    sec_enb: 1
+                    sec_mod: 7
+                    sec_meter_location: 0
+                    sec_addr: 2
+                    total_pac: 570
+                    total_fac: 12000
+                    meter_pac: 18
+                device4:
+                  summary: device=4 (battery static)
+                  value:
+                    isn: "OE012K01Z2610013"
+                    stu_r: 1
+                    type: 1
+                    mod_r: 2
+                    muf: 5
+                    mod: 9
+                    num: 3
+                    discharge_max: 10
+                    charge_max: 100
+                    battery:
+                      bid: 0
+                      devtype: "9"
+                      manufactoty: "AISWEI"
+                      partno: "20030261080011"
+                      modeltotal: 6
+                      monomertotoal: 96
+                      monomerinmodel: 16
+                      ratedvoltage: 3072
+                      capacity: 150
+                      hardwarever: "V1.0"
+                      softwarever: "V610-90002-12"
+                device5:
+                  summary: device=5 (dongle info)
+                  value:
+                    psn: "BA100D6100C3"
+                    key: "BQ9SDLGFXHPKHYA7"
+                    typ: 12
+                    nam: "Ai-Dongle LAN/WLAN"
+                    mod: "BA1300-30"
+                    muf: "AISWEI"
+                    brd: "AISWEI"
+                    hw: "M11"
+                    sw: "V610-09578-03.000"
+                    wsw: "ESP32-WROVER-IE"
+                    vcs: "V1.00.000"
+                    tim: "2026-03-31 06:30:35"
+                    pdk: "a2YDqmCYWpI"
+                    ser: "436f8d1a9491d5943fd5ae67c59c9e29"
+                    protocol: "V2.2"
+                    ali_ip: "ap-southeast-1"
+                    ali_port: 8883
+                    status: 0
+                    parallel: 0
+                    ssc: 0
+                    ap_chn: 0
+                    heap_left: 3960507
+                    min_heap_left: 3844635
+                    inv_stack_left: 10020
+                    cld_stack_left: 13152
+                    led_stack_left: 4376
+                    upgrade_percent: 0
+                    ethmac: "88:57:21:B9:0C:80"
+                    wlnmac: "88:57:21:B9:0C:83"
+                    func_mask: 17
+                    max_meter_num: 2
+        "404":
+          description: Device not found (device=1 always 404)
+
+  /getdevdata.cgi:
+    get:
+      summary: Get real-time device sensor data
+      description: |
+        Returns live sensor readings. Poll every 30 seconds recommended.
+        Response schema varies by `device` parameter.
+        - device=2: inverter live data (requires sn=)
+        - device=3: grid meter live data (no sn needed)
+        - device=4: battery live data (requires sn=)
+        - device=5: diesel/generator stub (all zeros on this unit)
+        - device=1/6: 404 not found
+      parameters:
+        - name: device
+          in: query
+          required: true
+          schema:
+            type: integer
+            enum: [2, 3, 4, 5]
+          description: |
+            Device to query:
+            - `2` = Inverter (requires `sn` parameter)
+            - `3` = Grid meter / CT clamp (no `sn` needed)
+            - `4` = Battery pack (requires `sn` parameter)
+            - `5` = Diesel/generator (all zeros on this unit)
+        - name: sn
+          in: query
+          required: false
+          schema:
+            type: string
+          description: |
+            Inverter serial number. Required for device=2 and device=4.
+            Example: `OE012K01Z2610013`
+      responses:
+        "200":
+          description: Real-time sensor data (schema depends on device)
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/InverterData'
+                  - $ref: '#/components/schemas/MeterData'
+                  - $ref: '#/components/schemas/BatteryData'
+                  - $ref: '#/components/schemas/DieselData'
+              examples:
+                device2_daytime:
+                  summary: device=2 during daytime generation
+                  value:
+                    flg: 1
+                    tim: "20260331063044"
+                    tmp: 295
+                    fac: 4998
+                    pac: 556
+                    sac: 556
+                    qac: 0
+                    eto: -201
+                    etd: 36
+                    hto: 32
+                    pf: 100
+                    wan: 0
+                    err: 0
+                    vac: [2461, 2455, 2450]
+                    iac: [1, 7, 7]
+                    vpv: [0, 0, 0]
+                    ipv: [0, 0, 0]
+                    str: []
+                    stu: 1
+                    pac1: 179
+                    qac1: 0
+                    pac2: 185
+                    qac2: 0
+                    pac3: 191
+                    qac3: 0
+                device3:
+                  summary: device=3 (grid meter live)
+                  value:
+                    flg: 0
+                    tim: "2026-03-31 06:30:41"
+                    pac: 18
+                    itd: 2
+                    otd: 2
+                    iet: 9
+                    oet: 223
+                    mod: 6
+                    meter_general:
+                      prc: -1167
+                      sac: 1322
+                      phs: 269
+                      pf: 0
+                      avg_v: 2460
+                      avg_i: 17
+                      iac: 53
+                      fac: 4996
+                      iqet: 0
+                      oqet: 0
+                    vac_phs: [2467, 2462, 2451]
+                    iac_phs: [25, 16, 12]
+                    vac_line: [4260, 4264, 4264]
+                    pac_phs: [126, 33, -166]
+                    prc_phs: [-572, -369, -231]
+                    sac_phs: [621, 406, 295]
+                    pf_phs: [22, 10, -56]
+                    ang_phs: [278, 268, 235]
+                    state_g100: 0
+                    power_limit_mode: 0
+                    billing_method: 0
+                device4:
+                  summary: device=4 (battery live)
+                  value:
+                    flg: 1
+                    tim: "20260331063054"
+                    ppv: 0
+                    etdpv: 0
+                    etopv: 0
+                    cst: 10
+                    bst: 1
+                    eb1: 65535
+                    wb1: 65535
+                    vb: 31790
+                    cb: 18
+                    pb: 572
+                    tb: 210
+                    soc: 81
+                    soh: 100
+                    cli: 600
+                    clo: 600
+                    ebi: 0
+                    ebo: 37
+                    eaci: 0
+                    eaco: 0
+                    vesp: 2456
+                    cesp: 0
+                    fesp: 0
+                    pesp: 0
+                    rpesp: 0
+                    etdesp: 0
+                    etoesp: 0
+                    vl1esp: 2464
+                    il1esp: 11
+                    pac1esp: 70
+                    qac1esp: 0
+                    vl2esp: 2454
+                    il2esp: 2
+                    pac2esp: 1
+                    qac2esp: 187
+                    vl3esp: 2450
+                    il3esp: 2
+                    pac3esp: 2
+                    qac3esp: 147
+
+  /getdefine.cgi:
+    get:
+      summary: Get inverter schedule / charge-discharge configuration
+      description: |
+        Returns TOU schedule windows and power limits (Pin/Pout).
+        Day-of-week keys: Sun, Mon, Tus, Wen, Thu, Fri, Sat.
+        Each day has an array of 6 integers representing schedule slot data
+        (encoded bitmasks for time windows and modes — exact encoding TBD).
+      responses:
+        "200":
+          description: Schedule and mode configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DefineConfig'
+              example:
+                Pin: 3000
+                Pout: 3000
+                Sun: [184595458, 285258755, 0, 0, 0, 0]
+                Mon: [184595458, 285258755, 0, 0, 0, 0]
+                Tus: [184595458, 285258755, 0, 0, 0, 0]
+                Wen: [184595458, 285258755, 0, 0, 0, 0]
+                Thu: [184595458, 285258755, 0, 0, 0, 0]
+                Fri: [184595458, 285258755, 0, 0, 0, 0]
+                Sat: [184595458, 285258755, 0, 0, 0, 0]
+
+  /setting.cgi:
+    post:
+      summary: Write inverter settings
+      description: |
+        POST to change inverter operating parameters including:
+        - Charge/discharge schedule (TOU)
+        - Battery charge limits
+        - Grid export limits
+        - Operating mode (self-consumption, time-of-use, backup, etc.)
+
+        When called without a valid body, returns `error : setting_handler`.
+        **⚠️ Use with caution — writes directly to inverter firmware.**
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SettingRequest'
+      responses:
+        "200":
+          description: Setting acknowledged or error message
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    type: integer
+                    description: 0 = success
+              example:
+                error: "setting_handler"
+
+components:
+  schemas:
+
+    DeviceInfoInverter:
+      type: object
+      description: Static inverter metadata (device=2)
+      properties:
+        inv:
+          type: array
+          items:
+            type: object
+            properties:
+              isn:
+                type: string
+                description: Inverter serial number
+              add:
+                type: integer
+                description: Modbus address
+              safety:
+                type: integer
+                description: Safety standard code (55 = AS4777 Australia)
+              rate:
+                type: integer
+                description: Rated power in watts (12000 = 12kW)
+              msw:
+                type: string
+                description: Main firmware version
+              ssw:
+                type: string
+                description: Sub firmware version
+              tsw:
+                type: string
+                description: Communication firmware version
+              cmv:
+                type: string
+                description: Control module version
+              mty:
+                type: integer
+                description: Machine type
+              typ:
+                type: integer
+                description: Inverter type (3 = hybrid)
+              stu:
+                type: integer
+                description: Status (0=offline, 1=normal)
+              model:
+                type: string
+                description: Model name (e.g. ASW12kH-T3)
+              Isw:
+                type: string
+                description: Inverter software version
+              afci:
+                type: string
+                description: AFCI version string (empty if not equipped)
+              pac:
+                type: integer
+                description: Current AC power (W) snapshot
+              etd:
+                type: integer
+                description: Energy today (kWh, may be negative due to firmware quirk)
+              eto:
+                type: integer
+                description: Total energy (kWh, may be negative due to firmware quirk)
+              err:
+                type: integer
+                description: Error code (0 = no error)
+              host:
+                type: integer
+                description: Host flag (0 = this unit is master)
+              battery_topo:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    bat_sn:
+                      type: string
+                      description: Battery serial number
+                    bat_id:
+                      type: integer
+                    bat_sw_ver:
+                      type: string
+                      description: Battery firmware version
+        num:
+          type: integer
+          description: Number of inverters
+
+    DeviceInfoMeter:
+      type: object
+      description: Grid meter configuration (device=3)
+      properties:
+        mod:
+          type: integer
+          description: Meter mode
+        enb:
+          type: integer
+          description: Meter enabled (1=yes)
+        exp_m:
+          type: integer
+          description: Export mode
+        regulate:
+          type: integer
+          description: Regulation type
+        enb_PF:
+          type: integer
+          description: Power factor control enabled
+        target_PF:
+          type: integer
+          description: Target power factor
+        in_cur_g100:
+          type: integer
+          description: G100 import current limit (× 100 A)
+        out_cur_g100:
+          type: integer
+          description: G100 export current limit (× 100 A)
+        usage_type_g100:
+          type: integer
+          description: G100 usage type
+        com_interruption_enable_g100:
+          type: integer
+          description: G100 communications interruption enabled
+        power_limit_mode:
+          type: integer
+          description: Power limit mode (0=none)
+        billing_method:
+          type: integer
+          description: Billing method
+        abs:
+          type: integer
+          description: Anti-backflow state
+        abs_offset:
+          type: integer
+          description: Anti-backflow offset (W)
+        sec_enb:
+          type: integer
+          description: Secondary meter enabled
+        sec_mod:
+          type: integer
+          description: Secondary meter mode
+        sec_meter_location:
+          type: integer
+          description: Secondary meter location
+        sec_addr:
+          type: integer
+          description: Secondary meter Modbus address
+        total_pac:
+          type: integer
+          description: Total AC power snapshot (W)
+        total_fac:
+          type: integer
+          description: Grid frequency snapshot (× 100 Hz)
+        meter_pac:
+          type: integer
+          description: Meter power snapshot (W)
+
+    DeviceInfoBattery:
+      type: object
+      description: Battery pack static info (device=4)
+      properties:
+        isn:
+          type: string
+          description: Inverter serial number (owner)
+        stu_r:
+          type: integer
+          description: Status register
+        type:
+          type: integer
+          description: Battery type
+        mod_r:
+          type: integer
+          description: Mode register
+        muf:
+          type: integer
+          description: Manufacturer code
+        mod:
+          type: integer
+          description: Module count
+        num:
+          type: integer
+          description: Number of battery packs
+        discharge_max:
+          type: integer
+          description: Maximum discharge SoC floor (%)
+        charge_max:
+          type: integer
+          description: Maximum charge SoC ceiling (%)
+        battery:
+          type: object
+          properties:
+            bid:
+              type: integer
+              description: Battery ID
+            devtype:
+              type: string
+              description: Device type code
+            manufactoty:
+              type: string
+              description: Manufacturer name (note: firmware typo for "manufacturer")
+            partno:
+              type: string
+              description: Battery serial number / part number
+            modeltotal:
+              type: integer
+              description: Total cell groups
+            monomertotoal:
+              type: integer
+              description: Total cell count (firmware typo for "monomer total")
+            monomerinmodel:
+              type: integer
+              description: Cells per group
+            ratedvoltage:
+              type: integer
+              description: Rated voltage (mV)
+            capacity:
+              type: integer
+              description: Battery capacity (Ah)
+            hardwarever:
+              type: string
+              description: Hardware version
+            softwarever:
+              type: string
+              description: Software version
+
+    DeviceInfoDongle:
+      type: object
+      description: WiFi dongle / ESP32 module info (device=5 or device=6, same response)
+      properties:
+        psn:
+          type: string
+          description: Dongle serial number
+        key:
+          type: string
+          description: Device key
+        typ:
+          type: integer
+          description: Dongle type (12)
+        nam:
+          type: string
+          description: Device name
+        mod:
+          type: string
+          description: Model number
+        muf:
+          type: string
+          description: Manufacturer
+        brd:
+          type: string
+          description: Brand
+        hw:
+          type: string
+          description: Hardware version
+        sw:
+          type: string
+          description: Software version
+        wsw:
+          type: string
+          description: WiFi chip firmware (ESP32-WROVER-IE)
+        vcs:
+          type: string
+          description: VCS version
+        tim:
+          type: string
+          description: Current device time (YYYY-MM-DD HH:mm:ss)
+        pdk:
+          type: string
+          description: PDK identifier
+        ser:
+          type: string
+          description: Serial hash
+        protocol:
+          type: string
+          description: Protocol version
+        ali_ip:
+          type: string
+          description: Alibaba Cloud IoT region endpoint
+        ali_port:
+          type: integer
+          description: Alibaba Cloud IoT MQTT port (8883)
+        status:
+          type: integer
+          description: Cloud connection status (0=connected)
+        parallel:
+          type: integer
+          description: Parallel inverter mode
+        ssc:
+          type: integer
+          description: SSC flag
+        ap_chn:
+          type: integer
+          description: AP channel
+        heap_left:
+          type: integer
+          description: Free heap memory (bytes)
+        min_heap_left:
+          type: integer
+          description: Minimum free heap ever recorded (bytes)
+        inv_stack_left:
+          type: integer
+          description: Inverter task stack free (bytes)
+        cld_stack_left:
+          type: integer
+          description: Cloud task stack free (bytes)
+        led_stack_left:
+          type: integer
+          description: LED task stack free (bytes)
+        upgrade_percent:
+          type: integer
+          description: OTA upgrade progress (0 = idle)
+        ethmac:
+          type: string
+          description: Ethernet MAC address
+        wlnmac:
+          type: string
+          description: WiFi MAC address
+        func_mask:
+          type: integer
+          description: Feature bitmask
+        max_meter_num:
+          type: integer
+          description: Maximum supported meters
+
+    InverterData:
+      type: object
+      description: Real-time inverter data (device=2)
+      properties:
+        flg:
+          type: integer
+          description: Data valid flag (1=valid)
+        tim:
+          type: string
+          description: Timestamp (YYYYMMDDHHmmss)
+        tmp:
+          type: integer
+          description: Inverter temperature × 10 (°C). Divide by 10. Example 295 = 29.5°C
+        fac:
+          type: integer
+          description: Grid frequency × 100 (Hz). Example 4998 = 49.98 Hz
+        pac:
+          type: integer
+          description: |
+            AC power output (W).
+            Positive = generating / discharging.
+            Use abs(pac) for load wattage context.
+          example: 556
+        sac:
+          type: integer
+          description: Apparent AC power (VA)
+        qac:
+          type: integer
+          description: Reactive AC power (VAR)
+        eto:
+          type: integer
+          description: |
+            Total energy (kWh, signed). Note: may be negative due to firmware quirk.
+            Absolute value = lifetime energy produced.
+        etd:
+          type: integer
+          description: Energy today (kWh, signed). Same firmware quirk as eto.
+        hto:
+          type: integer
+          description: Total operating hours
+        pf:
+          type: integer
+          description: Power factor × 100. Example 100 = 1.00
+        wan:
+          type: integer
+          description: WAN/connectivity flag
+        err:
+          type: integer
+          description: Error code (0 = no error)
+        vac:
+          type: array
+          items:
+            type: integer
+          description: AC phase voltages × 10 (V) — [L1, L2, L3]. Example [2461, 2455, 2450] = [246.1V, 245.5V, 245.0V]
+        iac:
+          type: array
+          items:
+            type: integer
+          description: AC phase currents × 10 (A) — [L1, L2, L3]
+        vpv:
+          type: array
+          items:
+            type: integer
+          description: |
+            DC PV string voltages × 10 (V) — [String1, String2, String3].
+            All zeros at night = no solar generation.
+            Use this to detect day/night state.
+        ipv:
+          type: array
+          items:
+            type: integer
+          description: DC PV string currents × 10 (A). All zeros at night.
+        str:
+          type: array
+          description: String data array (may be empty)
+        pac1:
+          type: integer
+          description: Phase 1 AC power (W)
+        qac1:
+          type: integer
+          description: Phase 1 reactive power (VAR)
+        pac2:
+          type: integer
+          description: Phase 2 AC power (W)
+        qac2:
+          type: integer
+          description: Phase 2 reactive power (VAR)
+        pac3:
+          type: integer
+          description: Phase 3 AC power (W)
+        qac3:
+          type: integer
+          description: Phase 3 reactive power (VAR)
+        stu:
+          type: integer
+          description: Operating status (0=standby, 1=normal, 2=fault)
+
+    MeterData:
+      type: object
+      description: |
+        Real-time grid meter / CT clamp data (device=3).
+        Note: `meter_general.prc` measures ALL power at the CT clamp point,
+        including battery discharge at night. Not purely PV.
+      properties:
+        flg:
+          type: integer
+          description: Data valid flag
+        tim:
+          type: string
+          description: Timestamp (YYYY-MM-DD HH:mm:ss)
+        pac:
+          type: integer
+          description: |
+            Grid power (W).
+            Negative = exporting to grid.
+            Positive = importing from grid.
+        itd:
+          type: integer
+          description: Grid energy imported today (kWh)
+        otd:
+          type: integer
+          description: Grid energy exported today (kWh × 100, divide by 100)
+        iet:
+          type: integer
+          description: Grid energy imported total (kWh)
+        oet:
+          type: integer
+          description: Grid energy exported total (kWh × 100, divide by 100)
+        mod:
+          type: integer
+          description: Meter mode
+        meter_general:
+          type: object
+          properties:
+            prc:
+              type: integer
+              description: |
+                Active power at CT clamp (W).
+                At night reflects battery discharge, NOT solar.
+                Negative = production/discharge at clamp; positive = load.
+            sac:
+              type: integer
+              description: Apparent power (VA)
+            phs:
+              type: integer
+              description: Phase angle
+            pf:
+              type: integer
+              description: Power factor (× 100)
+            avg_v:
+              type: integer
+              description: Average voltage × 10 (V)
+            avg_i:
+              type: integer
+              description: Average current × 10 (A)
+            iac:
+              type: integer
+              description: Total current × 10 (A)
+            fac:
+              type: integer
+              description: Frequency × 100 (Hz)
+            iqet:
+              type: integer
+              description: Reactive energy imported total
+            oqet:
+              type: integer
+              description: Reactive energy exported total
+        vac_phs:
+          type: array
+          items:
+            type: integer
+          description: Per-phase voltages × 10 (V) — [L1, L2, L3]
+        iac_phs:
+          type: array
+          items:
+            type: integer
+          description: Per-phase currents × 10 (A)
+        vac_line:
+          type: array
+          items:
+            type: integer
+          description: Line-to-line voltages × 10 (V) — [L1-L2, L2-L3, L3-L1]
+        pac_phs:
+          type: array
+          items:
+            type: integer
+          description: Per-phase grid power (W) — negative=export
+        prc_phs:
+          type: array
+          items:
+            type: integer
+          description: Per-phase CT clamp power (W)
+        sac_phs:
+          type: array
+          items:
+            type: integer
+          description: Per-phase apparent power (VA)
+        pf_phs:
+          type: array
+          items:
+            type: integer
+          description: Per-phase power factor (× 100)
+        ang_phs:
+          type: array
+          items:
+            type: integer
+          description: Per-phase angle (°)
+        state_g100:
+          type: integer
+          description: G100 state
+        power_limit_mode:
+          type: integer
+          description: Power limit mode
+        billing_method:
+          type: integer
+          description: Billing method
+
+    BatteryData:
+      type: object
+      description: Real-time battery pack data (device=4)
+      properties:
+        flg:
+          type: integer
+          description: Data valid flag
+        tim:
+          type: string
+          description: Timestamp (YYYYMMDDHHmmss)
+        ppv:
+          type: integer
+          description: PV power via battery path (W)
+        etdpv:
+          type: integer
+          description: PV energy today via battery (kWh)
+        etopv:
+          type: integer
+          description: PV energy total via battery (kWh)
+        cst:
+          type: integer
+          description: Charge state (10=active)
+        bst:
+          type: integer
+          description: Battery status flags
+        eb1:
+          type: integer
+          description: Battery energy register 1 (65535 when not applicable)
+        wb1:
+          type: integer
+          description: Battery power register 1 (65535 when not applicable)
+        vb:
+          type: integer
+          description: Battery voltage × 100 (V). Example 31790 = 317.90V
+        cb:
+          type: integer
+          description: Battery current (A)
+        pb:
+          type: integer
+          description: |
+            Battery power (W).
+            Positive = discharging (supplying home/grid).
+            Negative = charging.
+        tb:
+          type: integer
+          description: Battery temperature × 10 (°C). Example 210 = 21.0°C
+        soc:
+          type: integer
+          description: State of charge (%). 0–100.
+        soh:
+          type: integer
+          description: State of health (%). 100 = new.
+        cli:
+          type: integer
+          description: Charge current limit (A × 10)
+        clo:
+          type: integer
+          description: Discharge current limit (A × 10)
+        ebi:
+          type: integer
+          description: Total energy charged into battery (kWh)
+        ebo:
+          type: integer
+          description: Total energy discharged from battery (kWh)
+        eaci:
+          type: integer
+          description: AC energy in (kWh)
+        eaco:
+          type: integer
+          description: AC energy out (kWh)
+        vesp:
+          type: integer
+          description: ESP voltage × 10 (V)
+        cesp:
+          type: integer
+          description: ESP current
+        fesp:
+          type: integer
+          description: ESP frequency
+        pesp:
+          type: integer
+          description: ESP power (W)
+        rpesp:
+          type: integer
+          description: ESP reactive power
+        etdesp:
+          type: integer
+          description: ESP energy today
+        etoesp:
+          type: integer
+          description: ESP energy total
+        vl1esp:
+          type: integer
+          description: ESP L1 voltage × 10 (V)
+        il1esp:
+          type: integer
+          description: ESP L1 current × 10 (A)
+        pac1esp:
+          type: integer
+          description: ESP L1 power (W)
+        qac1esp:
+          type: integer
+          description: ESP L1 reactive power (VAR)
+        vl2esp:
+          type: integer
+          description: ESP L2 voltage × 10 (V)
+        il2esp:
+          type: integer
+          description: ESP L2 current × 10 (A)
+        pac2esp:
+          type: integer
+          description: ESP L2 power (W)
+        qac2esp:
+          type: integer
+          description: ESP L2 reactive power (VAR)
+        vl3esp:
+          type: integer
+          description: ESP L3 voltage × 10 (V)
+        il3esp:
+          type: integer
+          description: ESP L3 current × 10 (A)
+        pac3esp:
+          type: integer
+          description: ESP L3 power (W)
+        qac3esp:
+          type: integer
+          description: ESP L3 reactive power (VAR)
+
+    DieselData:
+      type: object
+      description: Diesel/generator data (device=5) — all zeros on this unit (no generator)
+      properties:
+        diesel_power:
+          type: integer
+          description: Generator power (W)
+        diesel_status:
+          type: integer
+          description: Generator status
+        diesel_mode:
+          type: integer
+          description: Generator mode
+        diesel_vac_phs:
+          type: array
+          items:
+            type: integer
+          description: Generator phase voltages
+        diesel_iac_phs:
+          type: array
+          items:
+            type: integer
+          description: Generator phase currents
+        diesel_pac_phs:
+          type: array
+          items:
+            type: integer
+          description: Generator phase powers
+        diesel_fac:
+          type: integer
+          description: Generator frequency
+
+    DefineConfig:
+      type: object
+      description: |
+        TOU schedule and power limits from /getdefine.cgi.
+        Day-of-week keys use abbreviated names: Sun, Mon, Tus, Wen, Thu, Fri, Sat.
+        Each day has an array of 6 integers representing encoded schedule slot data.
+        Exact bitmask encoding TBD — needs reverse-engineering via /setting.cgi writes.
+      properties:
+        Pin:
+          type: integer
+          description: Maximum charge power limit (W)
+        Pout:
+          type: integer
+          description: Maximum discharge power limit (W)
+        Sun:
+          type: array
+          items:
+            type: integer
+          description: Sunday schedule slots (6 integers, encoded)
+        Mon:
+          type: array
+          items:
+            type: integer
+          description: Monday schedule slots
+        Tus:
+          type: array
+          items:
+            type: integer
+          description: Tuesday schedule slots
+        Wen:
+          type: array
+          items:
+            type: integer
+          description: Wednesday schedule slots
+        Thu:
+          type: array
+          items:
+            type: integer
+          description: Thursday schedule slots
+        Fri:
+          type: array
+          items:
+            type: integer
+          description: Friday schedule slots
+        Sat:
+          type: array
+          items:
+            type: integer
+          description: Saturday schedule slots
+
+    SettingRequest:
+      type: object
+      description: |
+        Write settings to inverter. Exact field names vary by firmware version.
+        Use /getdefine.cgi first to read current values before writing.
+        Sending no body returns: `error : setting_handler`
+      properties:
+        work_mode:
+          type: integer
+          description: Operating mode
+        soc_min:
+          type: integer
+          description: Minimum discharge SoC (%)
+        soc_max:
+          type: integer
+          description: Maximum charge SoC (%)
+        Pin:
+          type: integer
+          description: Maximum charge power limit (W)
+        Pout:
+          type: integer
+          description: Maximum discharge power limit (W)
