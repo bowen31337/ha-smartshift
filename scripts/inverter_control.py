@@ -281,9 +281,9 @@ def get_battery_config() -> dict:
 # or rely on mod_r=2 (self-consumption) as base
 
 WORK_MODE_MAP = {
-    "self_consumption": 2,
-    "discharge": 2,       # Self-consumption = battery covers load (effectively discharge)
-    "charge": 5,          # TOU mode required for grid charging schedule
+    "self_consumption": 2,  # PV → home → battery → grid (inverter default)
+    "discharge": 2,         # Same as self_consumption — battery covers load
+    "charge": 2,            # No grid charging — charge only from PV (self_consumption handles it)
 }
 
 
@@ -384,56 +384,26 @@ def set_work_mode(mode: str, dry_run: bool = False) -> bool:
 
 def decide_action(spot_price: float, soc: int, feed_in_price: float = 0.0) -> str:
     """
-    Decide battery action using a 4-state price-aware strategy.
+    Decide battery action.
 
-    Strategy: maximise arbitrage profit on the 46kWh battery.
+    Strategy:
+      - NEVER buy from grid (sell price never below 4c — no grid arbitrage value)
+      - PV priority: home load → battery → grid export
+      - Battery discharges to cover home load whenever SoC > SOC_MIN
+      - Only fall back to self_consumption when battery is at floor (SoC <= SOC_MIN)
 
-    State machine:
-    ┌─────────────────────────────────────────────────────────────────┐
-    │ CHARGE  : spot < 12c AND soc < SOC_MAX                          │
-    │           → buy cheap grid power or let solar fill freely       │
-    │                                                                  │
-    │ HOLD    : price in solar window (12-20c) AND soc >= 80%         │
-    │           → preserve battery for evening peak, let solar export  │
-    │           → if soc < 80%: still discharge (need to get there)   │
-    │                                                                  │
-    │ DISCHARGE: price >= 20c AND soc > SOC_MIN                       │
-    │           → use battery to avoid expensive grid import           │
-    │           → at peak (>28c): discharge aggressively              │
-    │                                                                  │
-    │ PROTECT : soc <= SOC_MIN (5%)                                   │
-    │           → battery nearly empty, switch to self_consumption     │
-    └─────────────────────────────────────────────────────────────────┘
-
-    Key insight: cheap solar midday (9:30-13:30) fills battery for FREE.
-    Preserve charge from 13:30 onwards for 16:00-23:30 peak (30-35c).
-    Never export during cheap hours (feed-in rate goes negative).
+    In practice: always 'discharge' (self-consumption mode) unless battery is empty.
+    The inverter handles PV priority internally in self-consumption mode:
+      PV → home load first, surplus → battery, remainder → grid.
 
     Safety:
     - NEVER discharge below SOC_MIN (5%)
-    - NEVER charge above SOC_MAX (95%)
     """
-    # Safety floor — protect battery
     if soc <= SOC_MIN:
+        # Battery nearly empty — let PV cover load directly, don't drain further
         return "self_consumption"
 
-    # Cheap power — charge from grid or maximise solar absorption
-    if spot_price < CHARGE_THRESHOLD and soc < SOC_MAX:
-        return "charge"
-
-    # Solar preservation window (prices 15-20c = midday transition)
-    # Hold if we have good reserve already; otherwise keep discharging to cover load
-    if SOLAR_PRESERVE_LOW <= spot_price < SOLAR_PRESERVE_HIGH:
-        if soc >= SOC_PEAK_RESERVE:
-            return "self_consumption"  # topped up, hold for peak
-        else:
-            return "discharge"  # need more charge before peak
-
-    # Peak or above — discharge to maximise profit
-    if spot_price >= SOLAR_PRESERVE_HIGH and soc > SOC_MIN:
-        return "discharge"
-
-    # Default: use battery to avoid any grid import
+    # Battery has charge — use it to cover home load (PV fills it back during the day)
     return "discharge"
 
 
