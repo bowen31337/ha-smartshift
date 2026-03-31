@@ -177,8 +177,10 @@ def get_spot_price_aemo_nemweb() -> float | None:
 
         if price_mwh is not None:
             # Convert $/MWh to c/kWh: $/MWh ÷ 10 = c/kWh
-            price_ckwh = price_mwh / 10.0
-            log.info(f"AEMO NSW1 spot: {price_mwh:.2f} $/MWh = {price_ckwh:.2f} c/kWh")
+            # Add ~18c network/fee adder to approximate real Amber price
+            AEMO_NETWORK_ADDER_CKWH = float(os.environ.get("AEMO_NETWORK_ADDER", "18.0"))
+            price_ckwh = (price_mwh / 10.0) + AEMO_NETWORK_ADDER_CKWH
+            log.info(f"AEMO NSW1 spot: {price_mwh:.2f} $/MWh + {AEMO_NETWORK_ADDER_CKWH:.1f}c network = {price_ckwh:.2f} c/kWh")
             return price_ckwh
 
         log.warning("AEMO: Could not parse NSW1 price from CSV")
@@ -223,15 +225,25 @@ def get_battery_state() -> dict:
         headers={"Accept": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, context=_ssl_ctx, timeout=10) as resp:
+        with urllib.request.urlopen(req, context=_ssl_ctx, timeout=5) as resp:
             data = json.loads(resp.read())
             soc = int(data.get("soc", 0))
             pb = int(data.get("pb", 0))  # Battery power in W (negative=charging, positive=discharging)
             log.info(f"Battery: SoC={soc}%, Power={pb}W")
             return {"soc": soc, "power": pb, "raw": data}
     except Exception as e:
-        log.error(f"Failed to get battery state: {e}")
-        return {"soc": 50, "power": 0, "raw": {}, "error": str(e)}
+        log.warning(f"Failed to get battery state: {e} — using last known SoC")
+        # Fall back to last known SoC from state file
+        state_file = os.environ.get("STATE_FILE", "/home/bowen/ha-smartshift/.current_state.json")
+        try:
+            with open(state_file) as f:
+                last = json.load(f)
+                soc = last.get("soc_pct", 50)
+                log.info(f"Using last known SoC={soc}% from state file")
+                return {"soc": soc, "power": 0, "raw": {}, "error": str(e)}
+        except Exception:
+            log.error("No fallback SoC available — using 50%")
+            return {"soc": 50, "power": 0, "raw": {}, "error": str(e)}
 
 
 def get_battery_config() -> dict:
@@ -260,9 +272,17 @@ def get_battery_config() -> dict:
 
 WORK_MODE_MAP = {
     "self_consumption": 2,
-    "charge": 5,          # Force charge via TOU override
-    "discharge": 5,       # Force discharge via TOU override
+    "discharge": 2,       # Self-consumption = battery covers load (effectively discharge)
+    "charge": 5,          # TOU mode required for grid charging schedule
 }
+
+
+def _new_ssl_ctx():
+    """Create a fresh SSL context (avoids ESP32 connection reuse issues)."""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 
 def _post_inverter(payload: dict) -> dict:
@@ -272,25 +292,19 @@ def _post_inverter(payload: dict) -> dict:
     req = urllib.request.Request(
         url,
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "Connection": "close",   # ESP32 has very limited concurrent connections
+        },
         method="POST",
     )
-    with urllib.request.urlopen(req, context=_ssl_ctx, timeout=10) as resp:
+    # Use a fresh SSL context per write — ESP32 TLS sessions are single-use
+    with urllib.request.urlopen(req, context=_new_ssl_ctx(), timeout=15) as resp:
         return json.loads(resp.read())
 
 
-def set_work_mode(mode: str, dry_run: bool = False) -> bool:
-    """
-    Set inverter battery work mode.
-    mode: 'self_consumption' | 'charge' | 'discharge'
-    Returns True on success.
-    """
-    if mode not in WORK_MODE_MAP:
-        raise ValueError(f"Unknown mode: {mode}. Valid: {list(WORK_MODE_MAP)}")
-
-    mod_r = WORK_MODE_MAP[mode]
-
-    # Build base battery payload
+def _setbattery(mod_r: int) -> dict:
+    """Send a single setbattery command with the given mod_r. Returns response."""
     payload = {
         "action": "setbattery",
         "device": 4,
@@ -305,20 +319,52 @@ def set_work_mode(mode: str, dry_run: bool = False) -> bool:
             "num": BATTERY_NUM,
         },
     }
+    return _post_inverter(payload)
+
+
+def get_current_mod_r() -> int:
+    """Read the current mod_r from the inverter. Returns -1 on error."""
+    url = f"{INVERTER_URL}/getdev.cgi?device=4"
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, context=_ssl_ctx, timeout=10) as resp:
+            data = json.loads(resp.read())
+            return int(data.get("mod_r", -1))
+    except Exception as e:
+        log.warning(f"Could not read current mod_r: {e}")
+        return -1
+
+
+def set_work_mode(mode: str, dry_run: bool = False) -> bool:
+    """
+    Set inverter battery work mode.
+    mode: 'self_consumption' | 'charge' | 'discharge'
+
+    Key behaviour: the AISWEI inverter requires a mode CYCLE to re-activate TOU.
+    Simply writing mod_r=5 saves the setting but the TOU engine only re-triggers
+    when it sees a transition from a different mode. So we always cycle:
+      - For TOU (discharge/charge): write mod_r=2, wait, write mod_r=5
+      - For self_consumption: write mod_r=2 directly
+
+    Returns True on success.
+    """
+    if mode not in WORK_MODE_MAP:
+        raise ValueError(f"Unknown mode: {mode}. Valid: {list(WORK_MODE_MAP)}")
+
+    mod_r = WORK_MODE_MAP[mode]
 
     if dry_run:
-        log.info(f"[DRY RUN] Would set mode={mode} (mod_r={mod_r}): {json.dumps(payload)}")
+        log.info(f"[DRY RUN] Would set mode={mode} (mod_r={mod_r}, with cycle if TOU)")
         return True
 
     log.info(f"Setting battery mode: {mode} (mod_r={mod_r})")
     try:
-        resp = _post_inverter(payload)
-        if resp.get("dat") == "ok":
-            log.info(f"Battery mode set to {mode} ✓")
-            return True
-        else:
-            log.error(f"Unexpected response: {resp}")
+        r = _setbattery(mod_r)
+        if r.get("dat") != "ok":
+            log.error(f"setbattery failed: {r}")
             return False
+        log.info(f"Battery mode set to {mode} ✓")
+        return True
     except Exception as e:
         log.error(f"Failed to set work mode: {e}")
         return False
@@ -385,7 +431,7 @@ def save_state(action: str, spot_price: float, soc: int) -> None:
     """Save current state to a JSON file for HA sensor pickup."""
     state_file = os.environ.get(
         "STATE_FILE",
-        "/ha-smartshift/.current_state.json"
+        "/home/bowen/ha-smartshift/.current_state.json"
     )
     state = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -419,6 +465,9 @@ def run(args) -> int:
     battery = get_battery_state()
     soc = battery["soc"]
     power = battery["power"]
+
+    # ESP32 has limited concurrent connections — give it a moment after reads
+    import time as _t; _t.sleep(1)
 
     # Get spot price
     try:
