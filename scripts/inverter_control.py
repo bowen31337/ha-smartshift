@@ -72,18 +72,21 @@ _ssl_ctx.verify_mode = ssl.CERT_NONE
 
 # ─── Spot price functions ──────────────────────────────────────────────────────
 
-def get_spot_price_amber() -> float | None:
-    """Fetch current spot price from Amber Electric API. Returns c/kWh or None.
+def get_amber_prices() -> tuple[float, float] | None:
+    """
+    Fetch current buy + feed-in prices from Amber Electric API.
+    Returns (buy_price, feedin_price) in c/kWh, or None on failure.
 
-    Uses site-specific endpoint for accurate tariff-inclusive pricing.
+    buy_price:    general channel perKwh — what you pay to import (includes all fees)
+    feedin_price: feedIn channel perKwh — Amber convention: NEGATIVE = Amber pays you
+                  e.g. -14.0 means you earn 14c/kWh when exporting
+
     Falls back to site discovery if AMBER_SITE_ID not set.
-    Returns the general (consumption) channel perKwh — includes network, environmental, market fees.
     """
     if not AMBER_API_KEY:
         return None
 
     site_id = AMBER_SITE_ID
-    # Auto-discover site ID if not configured
     if not site_id:
         try:
             req = urllib.request.Request(
@@ -94,7 +97,7 @@ def get_spot_price_amber() -> float | None:
                 sites = json.loads(resp.read())
                 if sites:
                     site_id = sites[0]["id"]
-                    log.info(f"Amber: auto-discovered site {site_id} (NMI: {sites[0].get('nmi', '?')})")
+                    log.info(f"Amber: auto-discovered site {site_id}")
         except Exception as e:
             log.warning(f"Amber site discovery failed: {e}")
             return None
@@ -107,21 +110,34 @@ def get_spot_price_amber() -> float | None:
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
-            general_price = None
-            feedin_price = None
+            buy = None
+            feedin = None
             for item in data:
                 if item.get("type") == "CurrentInterval":
                     if item.get("channelType") == "general":
-                        general_price = float(item["perKwh"])
-                        log.info(f"Amber price: {general_price:.2f} c/kWh (spot: {item.get('spotPerKwh', '?')} c/kWh, {item.get('descriptor', '?')})")
+                        buy = float(item["perKwh"])
+                        earn = -buy  # just for display
+                        log.info(
+                            f"Amber buy: {buy:.2f} c/kWh "
+                            f"(spot: {item.get('spotPerKwh','?')} c/kWh, {item.get('descriptor','?')})"
+                        )
                     elif item.get("channelType") == "feedIn":
-                        feedin_price = float(item["perKwh"])
-                        log.info(f"Amber feed-in: {feedin_price:.2f} c/kWh")
-            if general_price is not None:
-                return general_price
+                        feedin = float(item["perKwh"])
+                        earn = -feedin
+                        log.info(f"Amber feed-in: {feedin:.2f} c/kWh (you earn {earn:.2f}c/kWh on export)")
+            if buy is not None and feedin is not None:
+                return buy, feedin
+            if buy is not None:
+                return buy, 0.0  # no feed-in channel
     except Exception as e:
         log.warning(f"Amber API error: {e}")
     return None
+
+
+def get_spot_price_amber() -> float | None:
+    """Compatibility wrapper — returns buy price only."""
+    result = get_amber_prices()
+    return result[0] if result else None
 
 
 def get_spot_price_aemo_nemweb() -> float | None:
@@ -201,25 +217,31 @@ def get_spot_price_aemo_nemweb() -> float | None:
         return None
 
 
-def get_spot_price() -> float:
+def get_prices() -> tuple[float, float]:
     """
-    Get current NSW spot price in c/kWh.
-    Priority: Amber API → AEMO nemweb → raises RuntimeError.
+    Get current (buy_price, feed_in_price) in c/kWh.
+    Priority: Amber API → AEMO nemweb fallback (feed_in=0 when using AEMO).
+    Raises RuntimeError if all sources fail.
     """
-    # 1. Try Amber
-    price = get_spot_price_amber()
-    if price is not None:
-        return price
+    # 1. Try Amber (returns both buy + feed-in)
+    result = get_amber_prices()
+    if result is not None:
+        return result
 
-    # 2. Try AEMO nemweb
+    # 2. Try AEMO nemweb (buy price only, no feed-in data)
     price = get_spot_price_aemo_nemweb()
     if price is not None:
-        return price
+        return price, 0.0
 
     raise RuntimeError(
         "Could not fetch spot price from any source. "
         "Set AMBER_API_KEY env var for Amber Electric API access."
     )
+
+
+def get_spot_price() -> float:
+    """Compatibility wrapper — returns buy price only."""
+    return get_prices()[0]
 
 
 # ─── Battery state ────────────────────────────────────────────────────────────
@@ -282,7 +304,7 @@ def get_battery_config() -> dict:
 
 WORK_MODE_MAP = {
     "self_consumption": 2,  # PV → home → battery → grid (inverter default)
-    "discharge": 2,         # Same as self_consumption — battery covers load
+    "discharge": 2,         # Same as self_consumption — battery covers load + exports surplus
     "charge": 2,            # No grid charging — charge only from PV (self_consumption handles it)
 }
 
@@ -384,30 +406,50 @@ def set_work_mode(mode: str, dry_run: bool = False) -> bool:
 
 def decide_action(spot_price: float, soc: int, feed_in_price: float = 0.0) -> str:
     """
-    Decide battery action.
+    Decide battery action to maximise profit on 46kWh battery.
+
+    Key facts:
+      - Never buy from grid (sell price always > 4c — no arbitrage value)
+      - feed_in_price: what Amber PAYS YOU per kWh exported (positive = you earn)
+      - 46kWh >> home evening load → must export to grid to monetise full capacity
+      - Midday solar is free — let it fill battery (self_consumption handles this)
 
     Strategy:
-      - NEVER buy from grid (sell price never below 4c — no grid arbitrage value)
-      - PV priority: home load → battery → grid export
-      - Battery discharges to cover home load whenever SoC > SOC_MIN
-      - Only fall back to self_consumption when battery is at floor (SoC <= SOC_MIN)
+      PROTECT  : soc <= SOC_MIN → self_consumption (don't flatten battery)
+      HOLD     : feed_in_price < EXPORT_THRESHOLD → self_consumption
+                 (price not worth exporting yet — let solar fill battery instead)
+      DISCHARGE: feed_in_price >= EXPORT_THRESHOLD AND soc > SOC_MIN
+                 → discharge aggressively to export at good price
+                 (battery covers home load AND exports surplus to grid)
 
-    In practice: always 'discharge' (self-consumption mode) unless battery is empty.
-    The inverter handles PV priority internally in self-consumption mode:
-      PV → home load first, surplus → battery, remainder → grid.
+    Amber feed-in sign: negative perKwh = Amber pays you that amount.
+    We receive abs(feed_in_price) per kWh exported when feed_in_price < 0.
+    EXPORT_THRESHOLD is the minimum we're willing to sell at (e.g. 10c).
 
     Safety:
     - NEVER discharge below SOC_MIN (5%)
     """
+    # Safety floor — protect battery
     if soc <= SOC_MIN:
-        # Battery nearly empty — let PV cover load directly, don't drain further
         return "self_consumption"
 
-    # Battery has charge — use it to cover home load (PV fills it back during the day)
-    return "discharge"
+    # Amber feed-in perKwh: negative means we GET paid that amount
+    # Convert to "what we earn per kWh exported"
+    earn_per_kwh = -feed_in_price  # positive = profitable export
+
+    # Export threshold: only discharge to sell if price is worth it
+    export_threshold = float(os.environ.get("EXPORT_THRESHOLD", "10.0"))  # c/kWh minimum to export
+
+    if earn_per_kwh >= export_threshold and soc > SOC_MIN:
+        # Good export price — discharge: covers home load AND pushes surplus to grid
+        return "discharge"
+
+    # Price not good enough to sell — self_consumption:
+    # PV fills battery, battery covers home load, minimal grid interaction
+    return "self_consumption"
 
 
-def save_state(action: str, spot_price: float, soc: int) -> None:
+def save_state(action: str, spot_price: float, soc: int, feed_in_price: float = 0.0) -> None:
     """Save current state to a JSON file for HA sensor pickup."""
     state_file = os.environ.get(
         "STATE_FILE",
@@ -417,6 +459,8 @@ def save_state(action: str, spot_price: float, soc: int) -> None:
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "action": action,
         "spot_price_ckwh": round(spot_price, 3),
+        "feed_in_ckwh": round(feed_in_price, 3),
+        "export_earn_ckwh": round(-feed_in_price, 3),
         "soc_pct": soc,
         "thresholds": {
             "charge_below": CHARGE_THRESHOLD,
@@ -449,18 +493,21 @@ def run(args) -> int:
     # ESP32 has limited concurrent connections — give it a moment after reads
     import time as _t; _t.sleep(1)
 
-    # Get spot price
+    # Get spot + feed-in prices
     try:
-        spot_price = get_spot_price()
+        spot_price, feed_in_price = get_prices()
+        earn = -feed_in_price
+        log.info(f"Prices: buy={spot_price:.2f}c  export_earn={earn:.2f}c/kWh")
     except RuntimeError as e:
         log.error(str(e))
         return 1
 
     # Decide action
     if args.mode == "auto":
-        action = decide_action(spot_price, soc)
+        action = decide_action(spot_price, soc, feed_in_price)
+        export_earn = -feed_in_price
         log.info(
-            f"Decision: spot={spot_price:.2f}c/kWh, SoC={soc}% → {action}"
+            f"Decision: buy={spot_price:.2f}c  earn={export_earn:.2f}c/kWh  SoC={soc}% → {action}"
         )
     else:
         action = args.mode
@@ -480,7 +527,7 @@ def run(args) -> int:
         log.info(f"Manual mode: {action}")
 
     # Save state for HA sensors
-    save_state(action, spot_price, soc)
+    save_state(action, spot_price, soc, feed_in_price)
 
     # Apply the mode
     success = set_work_mode(action, dry_run=args.dry_run)
