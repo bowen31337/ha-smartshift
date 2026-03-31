@@ -404,49 +404,86 @@ def set_work_mode(mode: str, dry_run: bool = False) -> bool:
 
 # ─── Decision logic ───────────────────────────────────────────────────────────
 
+def get_forecast_earn(lookahead_intervals: int = 6) -> list[float]:
+    """
+    Fetch next N x 5-min feed-in earn prices from Amber forecast.
+    Returns list of earn values (positive = we earn per kWh exported).
+    Returns [] on failure.
+    """
+    if not AMBER_API_KEY:
+        return []
+    site_id = AMBER_SITE_ID
+    if not site_id:
+        return []
+    try:
+        url = (
+            f"https://api.amber.com.au/v1/sites/{site_id}/prices/current"
+            f"?next={lookahead_intervals}&previous=0"
+        )
+        req = urllib.request.Request(
+            url,
+            headers={"Authorization": f"Bearer {AMBER_API_KEY}", "Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        earns = []
+        for item in data:
+            if item.get("channelType") == "feedIn" and item.get("type") == "ForecastInterval":
+                earns.append(-float(item["perKwh"]))
+        return earns
+    except Exception as e:
+        log.warning(f"Forecast fetch failed: {e}")
+        return []
+
+
 def decide_action(spot_price: float, soc: int, feed_in_price: float = 0.0) -> str:
     """
     Decide battery action to maximise profit on 46kWh battery.
 
     Key facts:
       - Never buy from grid (sell price always > 4c — no arbitrage value)
-      - feed_in_price: what Amber PAYS YOU per kWh exported (positive = you earn)
+      - feed_in_price: Amber feed-in perKwh (NEGATIVE = we earn that amount on export)
       - 46kWh >> home evening load → must export to grid to monetise full capacity
       - Midday solar is free — let it fill battery (self_consumption handles this)
 
-    Strategy:
-      PROTECT  : soc <= SOC_MIN → self_consumption (don't flatten battery)
-      HOLD     : feed_in_price < EXPORT_THRESHOLD → self_consumption
-                 (price not worth exporting yet — let solar fill battery instead)
-      DISCHARGE: feed_in_price >= EXPORT_THRESHOLD AND soc > SOC_MIN
-                 → discharge aggressively to export at good price
-                 (battery covers home load AND exports surplus to grid)
+    Decision uses lookahead (next 30 min = 6 x 5-min intervals):
+      - If current earn >= threshold AND no significantly better price coming soon → DISCHARGE now
+      - If current earn >= threshold BUT a much higher price is forecast soon → HOLD (save battery)
+      - If current earn < threshold → SELF_CONSUME (hold for better price or let solar fill)
 
-    Amber feed-in sign: negative perKwh = Amber pays you that amount.
-    We receive abs(feed_in_price) per kWh exported when feed_in_price < 0.
-    EXPORT_THRESHOLD is the minimum we're willing to sell at (e.g. 10c).
+    "Significantly better" = forecast max > current earn * HOLD_RATIO (default 1.3 = 30% better)
 
     Safety:
     - NEVER discharge below SOC_MIN (5%)
     """
-    # Safety floor — protect battery
+    export_threshold = float(os.environ.get("EXPORT_THRESHOLD", "10.0"))
+    hold_ratio = float(os.environ.get("HOLD_RATIO", "1.3"))  # hold if forecast is 30% better
+
+    # Safety floor
     if soc <= SOC_MIN:
         return "self_consumption"
 
-    # Amber feed-in perKwh: negative means we GET paid that amount
-    # Convert to "what we earn per kWh exported"
-    earn_per_kwh = -feed_in_price  # positive = profitable export
+    earn_now = -feed_in_price  # positive = we earn this per kWh exported
 
-    # Export threshold: only discharge to sell if price is worth it
-    export_threshold = float(os.environ.get("EXPORT_THRESHOLD", "10.0"))  # c/kWh minimum to export
+    if earn_now < export_threshold:
+        # Not worth exporting — hold/self-consume, let solar fill battery
+        return "self_consumption"
 
-    if earn_per_kwh >= export_threshold and soc > SOC_MIN:
-        # Good export price — discharge: covers home load AND pushes surplus to grid
-        return "discharge"
+    # Current price is good. Check if we should wait for something better.
+    forecast = get_forecast_earn(lookahead_intervals=6)  # next 30 min
+    if forecast:
+        best_forecast = max(forecast)
+        if best_forecast > earn_now * hold_ratio:
+            # A significantly better price is coming in the next 30 min — wait
+            log.info(
+                f"Lookahead: earn_now={earn_now:.2f}c, "
+                f"best_forecast={best_forecast:.2f}c in 30min → HOLD for better price"
+            )
+            return "self_consumption"
 
-    # Price not good enough to sell — self_consumption:
-    # PV fills battery, battery covers home load, minimal grid interaction
-    return "self_consumption"
+    # Current price is good and nothing much better coming — export now
+    log.info(f"Export decision: earn={earn_now:.2f}c/kWh ≥ {export_threshold}c threshold → discharge")
+    return "discharge"
 
 
 def save_state(action: str, spot_price: float, soc: int, feed_in_price: float = 0.0) -> None:
