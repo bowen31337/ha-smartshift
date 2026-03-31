@@ -6,7 +6,7 @@ info:
     Hosted on the inverter's embedded ESP32 WiFi module (Ai-Dongle LAN/WLAN, BA1300-30).
 
     **Connection:**
-    - Host: `10.0.0.6` (LAN IP, may vary)
+    - Host: `10.0.0.2` (LAN IP as of 2026-03-31, may vary — check via ARP/nmap if unreachable)
     - Protocol: HTTPS port 443 (self-signed certificate — disable SSL verification)
     - Authentication: None (open local API)
     - The inverter goes offline overnight (no solar) and wakes at sunrise
@@ -52,8 +52,8 @@ info:
     email: bowen31337@outlook.com
 
 servers:
-  - url: https://10.0.0.6
-    description: Local inverter (LAN only, self-signed cert)
+  - url: https://10.0.0.2
+    description: Local inverter (LAN only, self-signed cert) — IP as of 2026-03-31
 
 paths:
 
