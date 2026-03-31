@@ -22,6 +22,16 @@ import urllib.error
 import ssl
 import time
 from datetime import datetime, timezone
+from pathlib import Path
+
+# Load .env file if present (host dev environment — Docker uses run_smartshift.sh env vars)
+_env_file = Path(__file__).parent.parent / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text().splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _v = _line.split("=", 1)
+            os.environ.setdefault(_k.strip(), _v.strip())
 
 logging.basicConfig(
     level=logging.INFO,
