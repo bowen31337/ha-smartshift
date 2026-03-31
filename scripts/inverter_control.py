@@ -320,7 +320,7 @@ def save_state(action: str, spot_price: float, soc: int) -> None:
     """Save current state to a JSON file for HA sensor pickup."""
     state_file = os.environ.get(
         "STATE_FILE",
-        "/home/bowen/ha-smartshift/.current_state.json"
+        "/ha-smartshift/.current_state.json"
     )
     state = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
