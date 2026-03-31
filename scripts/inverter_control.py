@@ -37,12 +37,15 @@ AMBER_API_KEY = os.environ.get("AMBER_API_KEY", "")
 AMBER_SITE_ID = os.environ.get("AMBER_SITE_ID", "")
 
 # Decision thresholds (cents/kWh)
-CHARGE_THRESHOLD = float(os.environ.get("CHARGE_THRESHOLD", "5"))
-DISCHARGE_THRESHOLD = float(os.environ.get("DISCHARGE_THRESHOLD", "25"))
+CHARGE_THRESHOLD = float(os.environ.get("CHARGE_THRESHOLD", "12"))   # Force-charge from grid if below this
+PEAK_THRESHOLD = float(os.environ.get("PEAK_THRESHOLD", "28"))       # Peak pricing — discharge hard
+SOLAR_PRESERVE_LOW = float(os.environ.get("SOLAR_PRESERVE_LOW", "15"))  # Solar window start — preserve battery
+SOLAR_PRESERVE_HIGH = float(os.environ.get("SOLAR_PRESERVE_HIGH", "20")) # Solar window end — start releasing
 
 # Safety limits
 SOC_MIN = float(os.environ.get("SOC_MIN", "5"))    # Never discharge below (nearly empty)
 SOC_MAX = float(os.environ.get("SOC_MAX", "95"))   # Never charge above
+SOC_PEAK_RESERVE = float(os.environ.get("SOC_PEAK_RESERVE", "80"))  # Target SoC to have at peak start
 
 # Battery config (read from inverter, these are fallback defaults)
 BATTERY_MUF = 5
@@ -94,11 +97,18 @@ def get_spot_price_amber() -> float | None:
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
+            general_price = None
+            feedin_price = None
             for item in data:
-                if item.get("type") == "CurrentInterval" and item.get("channelType") == "general":
-                    price = float(item["perKwh"])
-                    log.info(f"Amber price: {price:.2f} c/kWh (spot: {item.get('spotPerKwh', '?')} c/kWh, {item.get('descriptor', '?')})")
-                    return price
+                if item.get("type") == "CurrentInterval":
+                    if item.get("channelType") == "general":
+                        general_price = float(item["perKwh"])
+                        log.info(f"Amber price: {general_price:.2f} c/kWh (spot: {item.get('spotPerKwh', '?')} c/kWh, {item.get('descriptor', '?')})")
+                    elif item.get("channelType") == "feedIn":
+                        feedin_price = float(item["perKwh"])
+                        log.info(f"Amber feed-in: {feedin_price:.2f} c/kWh")
+            if general_price is not None:
+                return general_price
     except Exception as e:
         log.warning(f"Amber API error: {e}")
     return None
@@ -316,29 +326,59 @@ def set_work_mode(mode: str, dry_run: bool = False) -> bool:
 
 # ─── Decision logic ───────────────────────────────────────────────────────────
 
-def decide_action(spot_price: float, soc: int) -> str:
+def decide_action(spot_price: float, soc: int, feed_in_price: float = 0.0) -> str:
     """
-    Decide battery action based on spot price and SoC.
+    Decide battery action using a 4-state price-aware strategy.
 
-    Rules:
-    - spot < CHARGE_THRESHOLD (5c) AND soc < SOC_MAX (95%) → charge (cheap grid power)
-    - soc > SOC_MIN (5%) → discharge (always prefer battery over grid)
-    - soc <= SOC_MIN → self_consumption (battery nearly empty, protect it)
+    Strategy: maximise arbitrage profit on the 46kWh battery.
 
-    Philosophy: NEVER draw from grid while battery has charge.
-    The battery exists to power the house — use it. Only fall back to
-    grid when battery is genuinely empty (soc <= SOC_MIN = 5%).
+    State machine:
+    ┌─────────────────────────────────────────────────────────────────┐
+    │ CHARGE  : spot < 12c AND soc < SOC_MAX                          │
+    │           → buy cheap grid power or let solar fill freely       │
+    │                                                                  │
+    │ HOLD    : price in solar window (12-20c) AND soc >= 80%         │
+    │           → preserve battery for evening peak, let solar export  │
+    │           → if soc < 80%: still discharge (need to get there)   │
+    │                                                                  │
+    │ DISCHARGE: price >= 20c AND soc > SOC_MIN                       │
+    │           → use battery to avoid expensive grid import           │
+    │           → at peak (>28c): discharge aggressively              │
+    │                                                                  │
+    │ PROTECT : soc <= SOC_MIN (5%)                                   │
+    │           → battery nearly empty, switch to self_consumption     │
+    └─────────────────────────────────────────────────────────────────┘
 
-    Safety hard limits:
+    Key insight: cheap solar midday (9:30-13:30) fills battery for FREE.
+    Preserve charge from 13:30 onwards for 16:00-23:30 peak (30-35c).
+    Never export during cheap hours (feed-in rate goes negative).
+
+    Safety:
     - NEVER discharge below SOC_MIN (5%)
     - NEVER charge above SOC_MAX (95%)
     """
+    # Safety floor — protect battery
+    if soc <= SOC_MIN:
+        return "self_consumption"
+
+    # Cheap power — charge from grid or maximise solar absorption
     if spot_price < CHARGE_THRESHOLD and soc < SOC_MAX:
         return "charge"
-    elif soc > SOC_MIN:
+
+    # Solar preservation window (prices 15-20c = midday transition)
+    # Hold if we have good reserve already; otherwise keep discharging to cover load
+    if SOLAR_PRESERVE_LOW <= spot_price < SOLAR_PRESERVE_HIGH:
+        if soc >= SOC_PEAK_RESERVE:
+            return "self_consumption"  # topped up, hold for peak
+        else:
+            return "discharge"  # need more charge before peak
+
+    # Peak or above — discharge to maximise profit
+    if spot_price >= SOLAR_PRESERVE_HIGH and soc > SOC_MIN:
         return "discharge"
-    else:
-        return "self_consumption"
+
+    # Default: use battery to avoid any grid import
+    return "discharge"
 
 
 def save_state(action: str, spot_price: float, soc: int) -> None:
@@ -354,7 +394,7 @@ def save_state(action: str, spot_price: float, soc: int) -> None:
         "soc_pct": soc,
         "thresholds": {
             "charge_below": CHARGE_THRESHOLD,
-            "discharge_above": DISCHARGE_THRESHOLD,
+            "discharge_above": PEAK_THRESHOLD,
             "soc_min": SOC_MIN,
             "soc_max": SOC_MAX,
         },
