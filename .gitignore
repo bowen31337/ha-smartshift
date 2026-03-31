@@ -5,3 +5,8 @@ __pycache__/
 *.pyc
 .venv/
 smartshift.log
+.venv/
+.coverage
+uv.lock
+smartshift.log
+.current_state.json
