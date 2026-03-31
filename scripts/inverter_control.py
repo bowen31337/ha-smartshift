@@ -41,7 +41,7 @@ CHARGE_THRESHOLD = float(os.environ.get("CHARGE_THRESHOLD", "5"))
 DISCHARGE_THRESHOLD = float(os.environ.get("DISCHARGE_THRESHOLD", "25"))
 
 # Safety limits
-SOC_MIN = float(os.environ.get("SOC_MIN", "20"))   # Never discharge below
+SOC_MIN = float(os.environ.get("SOC_MIN", "5"))    # Never discharge below (nearly empty)
 SOC_MAX = float(os.environ.get("SOC_MAX", "95"))   # Never charge above
 
 # Battery config (read from inverter, these are fallback defaults)
@@ -321,17 +321,21 @@ def decide_action(spot_price: float, soc: int) -> str:
     Decide battery action based on spot price and SoC.
 
     Rules:
-    - spot < CHARGE_THRESHOLD (5c) AND soc < SOC_MAX (95%) → charge
-    - spot > DISCHARGE_THRESHOLD (25c) AND soc > SOC_MIN (20%) → discharge
-    - else → self_consumption
+    - spot < CHARGE_THRESHOLD (5c) AND soc < SOC_MAX (95%) → charge (cheap grid power)
+    - soc > SOC_MIN (5%) → discharge (always prefer battery over grid)
+    - soc <= SOC_MIN → self_consumption (battery nearly empty, protect it)
+
+    Philosophy: NEVER draw from grid while battery has charge.
+    The battery exists to power the house — use it. Only fall back to
+    grid when battery is genuinely empty (soc <= SOC_MIN = 5%).
 
     Safety hard limits:
-    - NEVER discharge below SOC_MIN
-    - NEVER charge above SOC_MAX
+    - NEVER discharge below SOC_MIN (5%)
+    - NEVER charge above SOC_MAX (95%)
     """
     if spot_price < CHARGE_THRESHOLD and soc < SOC_MAX:
         return "charge"
-    elif spot_price > DISCHARGE_THRESHOLD and soc > SOC_MIN:
+    elif soc > SOC_MIN:
         return "discharge"
     else:
         return "self_consumption"
