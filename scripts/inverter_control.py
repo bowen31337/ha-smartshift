@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 INVERTER_URL = os.environ.get("INVERTER_URL", "https://192.168.1.100")
 INVERTER_SN = os.environ.get("INVERTER_SN", "")
 AMBER_API_KEY = os.environ.get("AMBER_API_KEY", "")
-AMBER_STATE = os.environ.get("AMBER_STATE", "NSW")
+AMBER_SITE_ID = os.environ.get("AMBER_SITE_ID", "")
 
 # Decision thresholds (cents/kWh)
 CHARGE_THRESHOLD = float(os.environ.get("CHARGE_THRESHOLD", "5"))
@@ -60,10 +60,33 @@ _ssl_ctx.verify_mode = ssl.CERT_NONE
 # ─── Spot price functions ──────────────────────────────────────────────────────
 
 def get_spot_price_amber() -> float | None:
-    """Fetch current spot price from Amber Electric API. Returns c/kWh or None."""
+    """Fetch current spot price from Amber Electric API. Returns c/kWh or None.
+
+    Uses site-specific endpoint for accurate tariff-inclusive pricing.
+    Falls back to site discovery if AMBER_SITE_ID not set.
+    Returns the general (consumption) channel perKwh — includes network, environmental, market fees.
+    """
     if not AMBER_API_KEY:
         return None
-    url = f"https://api.amber.com.au/v1/prices/current?next=0&previous=0&state={AMBER_STATE}"
+
+    site_id = AMBER_SITE_ID
+    # Auto-discover site ID if not configured
+    if not site_id:
+        try:
+            req = urllib.request.Request(
+                "https://api.amber.com.au/v1/sites",
+                headers={"Authorization": f"Bearer {AMBER_API_KEY}", "Accept": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                sites = json.loads(resp.read())
+                if sites:
+                    site_id = sites[0]["id"]
+                    log.info(f"Amber: auto-discovered site {site_id} (NMI: {sites[0].get('nmi', '?')})")
+        except Exception as e:
+            log.warning(f"Amber site discovery failed: {e}")
+            return None
+
+    url = f"https://api.amber.com.au/v1/sites/{site_id}/prices/current?next=0&previous=0"
     req = urllib.request.Request(
         url,
         headers={"Authorization": f"Bearer {AMBER_API_KEY}", "Accept": "application/json"},
@@ -71,12 +94,10 @@ def get_spot_price_amber() -> float | None:
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read())
-            # Amber returns list of intervals, find 'general' type current interval
             for item in data:
-                if item.get("type") == "CurrentInterval":
-                    # perKwh is in c/kWh
+                if item.get("type") == "CurrentInterval" and item.get("channelType") == "general":
                     price = float(item["perKwh"])
-                    log.info(f"Amber spot price: {price:.2f} c/kWh")
+                    log.info(f"Amber price: {price:.2f} c/kWh (spot: {item.get('spotPerKwh', '?')} c/kWh, {item.get('descriptor', '?')})")
                     return price
     except Exception as e:
         log.warning(f"Amber API error: {e}")
