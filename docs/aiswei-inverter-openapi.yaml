@@ -1109,7 +1109,23 @@ components:
         TOU schedule and power limits from /getdefine.cgi.
         Day-of-week keys use abbreviated names: Sun, Mon, Tus, Wen, Thu, Fri, Sat.
         Each day has an array of 6 integers representing encoded schedule slot data.
-        Exact bitmask encoding TBD — needs reverse-engineering via /setting.cgi writes.
+
+        SLOT ENCODING (reverse-engineered from factory defaults):
+          slot = (start_hour << 24) | (duration_minutes << 8) | mode_byte
+          mode_byte: 0x02 = CHARGE, 0x03 = DISCHARGE
+          duration_minutes: max 255 per slot (4h15m). Use adjacent slots for longer windows.
+
+        Example:
+          0x0b00b402 = 184595458 → start=11:00, duration=180min (3h), CHARGE
+          0x1100b403 = 285258755 → start=17:00, duration=180min (3h), DISCHARGE
+
+        Python helper:
+          def mk_slot(hour, minutes, mode):
+              return hour * 0x1000000 + minutes * 0x100 + (2 if mode=='charge' else 3)
+
+        NOTE: /setting.cgi does NOT support setdefine action (returns 404).
+        The TOU schedule can only be written via the Solplanet cloud app (Alibaba IoT bridge).
+        Local API supports: setbattery (mod_r, discharge_max, charge_max) only.
       properties:
         Pin:
           type: integer
