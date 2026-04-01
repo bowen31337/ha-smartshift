@@ -559,8 +559,19 @@ def decide_action(spot_price: float, soc: int, feed_in_price: float = 0.0) -> st
     soc_floor_cloudy = float(os.environ.get("SOC_FLOOR_CLOUDY", "30"))
     soc_floor_partly = float(os.environ.get("SOC_FLOOR_PARTLY", "20"))
 
+    # --- Edge case: negative spot price (grid pays you to consume) ---
+    # When spot price is negative or near-zero, grid is literally paying us to take power.
+    # Force charge even if battery is high — free energy.
+    neg_price_threshold = float(os.environ.get("NEG_PRICE_THRESHOLD", "0"))  # c/kWh
+    if spot_price <= neg_price_threshold and soc < SOC_MAX:
+        log.info(
+            f"⚡ Negative/zero spot price ({spot_price:.2f}c) → force charge from grid (free energy)"
+        )
+        return "charge"
+
     # Safety floor — absolute minimum
     if soc <= SOC_MIN:
+        log.info(f"🔋 Battery critical: SoC={soc}% ≤ {SOC_MIN}% → self_consumption (grid covers load)")
         return "self_consumption"
 
     earn_now = -feed_in_price
@@ -650,8 +661,12 @@ def run(args) -> int:
     log.info("ha-smartshift inverter control")
     log.info("=" * 60)
 
-    # Get battery state
+    # Get battery state — if inverter unreachable, fail safe
     battery = get_battery_state()
+    if not battery or battery.get("soc") is None:
+        log.error("⚠️ Inverter unreachable — cannot read battery state. No action taken.")
+        log.error("Inverter may be offline, rebooting, or network issue to 10.0.0.2")
+        return 1
     soc = battery["soc"]
     power = battery["power"]
 
