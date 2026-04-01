@@ -404,6 +404,88 @@ def set_work_mode(mode: str, dry_run: bool = False) -> bool:
 
 # ─── Decision logic ───────────────────────────────────────────────────────────
 
+# ---------------------------------------------------------------------------
+# Solar / Weather Forecast
+# ---------------------------------------------------------------------------
+
+SOLAR_CAPACITY_KW = float(os.environ.get("SOLAR_CAPACITY_KW", "20.0"))  # panel max output
+BATTERY_CAPACITY_KWH = float(os.environ.get("BATTERY_CAPACITY_KWH", "46.0"))
+# Kellyville NSW default coords
+LATITUDE = float(os.environ.get("LATITUDE", "-33.73"))
+LONGITUDE = float(os.environ.get("LONGITUDE", "150.97"))
+
+
+def get_solar_forecast() -> dict:
+    """
+    Fetch tomorrow's solar production estimate from Open-Meteo.
+    Returns dict with:
+      - tomorrow_kwh: estimated kWh production tomorrow (simple model)
+      - tomorrow_sunny: True if mostly clear (avg cloud < 40%)
+      - tomorrow_peak_hours: number of hours with >400 W/m² radiation
+      - confidence: 'sunny' | 'partly_cloudy' | 'cloudy'
+    Returns empty dict on failure.
+    """
+    try:
+        url = (
+            f"https://api.open-meteo.com/v1/forecast"
+            f"?latitude={LATITUDE}&longitude={LONGITUDE}"
+            f"&hourly=shortwave_radiation,cloudcover"
+            f"&timezone=Australia/Sydney&forecast_days=2"
+        )
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+
+        hourly = data["hourly"]
+        times = hourly["time"]
+        radiation = hourly["shortwave_radiation"]
+        cloud = hourly["cloudcover"]
+
+        # Find tomorrow's daylight hours (index 24-47 = tomorrow 00:00-23:00)
+        tomorrow_rad = []
+        tomorrow_cloud = []
+        for i in range(24, min(48, len(times))):
+            hour = int(times[i][11:13])
+            if 6 <= hour <= 18:  # daylight
+                tomorrow_rad.append(radiation[i] or 0)
+                tomorrow_cloud.append(cloud[i] or 0)
+
+        if not tomorrow_rad:
+            return {}
+
+        # Simple solar estimate: sum(radiation) * panel_efficiency * area_factor
+        # radiation is W/m² per hour, for a 20kW system we scale proportionally
+        # Peak radiation ~1000 W/m² = 100% of rated capacity
+        est_kwh = sum(r / 1000.0 * SOLAR_CAPACITY_KW for r in tomorrow_rad)
+        avg_cloud = sum(tomorrow_cloud) / len(tomorrow_cloud)
+        peak_hours = sum(1 for r in tomorrow_rad if r > 400)
+
+        if avg_cloud < 30:
+            confidence = "sunny"
+        elif avg_cloud < 60:
+            confidence = "partly_cloudy"
+        else:
+            confidence = "cloudy"
+
+        result = {
+            "tomorrow_kwh": round(est_kwh, 1),
+            "tomorrow_sunny": avg_cloud < 40,
+            "tomorrow_peak_hours": peak_hours,
+            "avg_cloud": round(avg_cloud, 1),
+            "confidence": confidence,
+        }
+        log.info(
+            f"Solar forecast: {result['tomorrow_kwh']}kWh tomorrow, "
+            f"{result['confidence']} (cloud={result['avg_cloud']}%, "
+            f"peak_hours={result['tomorrow_peak_hours']})"
+        )
+        return result
+
+    except Exception as e:
+        log.warning(f"Solar forecast failed: {e}")
+        return {}
+
+
 def get_forecast_earn(lookahead_intervals: int = 6) -> list[float]:
     """
     Fetch next N x 5-min feed-in earn prices from Amber forecast.
@@ -444,44 +526,75 @@ def decide_action(spot_price: float, soc: int, feed_in_price: float = 0.0) -> st
       - Never buy from grid (sell price always > 4c — no arbitrage value)
       - feed_in_price: Amber feed-in perKwh (NEGATIVE = we earn that amount on export)
       - 46kWh >> home evening load → must export to grid to monetise full capacity
-      - Midday solar is free — let it fill battery (self_consumption handles this)
+      - 20kW solar can refill battery in ~2.5h on a sunny day
 
-    Decision uses lookahead (next 30 min = 6 x 5-min intervals):
-      - If current earn >= threshold AND no significantly better price coming soon → DISCHARGE now
-      - If current earn >= threshold BUT a much higher price is forecast soon → HOLD (save battery)
-      - If current earn < threshold → SELF_CONSUME (hold for better price or let solar fill)
-
-    "Significantly better" = forecast max > current earn * HOLD_RATIO (default 1.3 = 30% better)
+    Strategy layers:
+      1. Safety floor: SoC ≤ SOC_MIN → self_consumption
+      2. Weather-adjusted discharge floor:
+         - Sunny tomorrow → can drain to SOC_MIN (solar refills fast)
+         - Cloudy tomorrow → keep reserve (SOC_FLOOR_CLOUDY, default 30%)
+         - Partly cloudy → keep modest reserve (SOC_FLOOR_PARTLY, default 20%)
+      3. Price lookahead: hold if 30% better price coming in 30 min
+      4. Export threshold: only discharge when earn ≥ threshold
 
     Safety:
     - NEVER discharge below SOC_MIN (5%)
     """
     export_threshold = float(os.environ.get("EXPORT_THRESHOLD", "10.0"))
-    hold_ratio = float(os.environ.get("HOLD_RATIO", "1.3"))  # hold if forecast is 30% better
+    hold_ratio = float(os.environ.get("HOLD_RATIO", "1.3"))
+    soc_floor_cloudy = float(os.environ.get("SOC_FLOOR_CLOUDY", "30"))
+    soc_floor_partly = float(os.environ.get("SOC_FLOOR_PARTLY", "20"))
 
-    # Safety floor
+    # Safety floor — absolute minimum
     if soc <= SOC_MIN:
         return "self_consumption"
 
-    earn_now = -feed_in_price  # positive = we earn this per kWh exported
+    earn_now = -feed_in_price
 
     if earn_now < export_threshold:
-        # Not worth exporting — hold/self-consume, let solar fill battery
         return "self_consumption"
 
-    # Current price is good. Check if we should wait for something better.
-    forecast = get_forecast_earn(lookahead_intervals=6)  # next 30 min
+    # --- Weather-adjusted discharge floor ---
+    solar = get_solar_forecast()
+    discharge_floor = SOC_MIN  # default: drain to minimum (sunny assumption)
+
+    if solar:
+        confidence = solar.get("confidence", "sunny")
+        if confidence == "cloudy":
+            discharge_floor = soc_floor_cloudy
+            log.info(
+                f"Weather: cloudy tomorrow ({solar.get('tomorrow_kwh', '?')}kWh est) "
+                f"→ keeping {discharge_floor}% reserve"
+            )
+        elif confidence == "partly_cloudy":
+            discharge_floor = soc_floor_partly
+            log.info(
+                f"Weather: partly cloudy tomorrow ({solar.get('tomorrow_kwh', '?')}kWh est) "
+                f"→ keeping {discharge_floor}% reserve"
+            )
+        else:
+            log.info(
+                f"Weather: sunny tomorrow ({solar.get('tomorrow_kwh', '?')}kWh est) "
+                f"→ aggressive discharge OK (floor={discharge_floor}%)"
+            )
+
+    if soc <= discharge_floor:
+        log.info(
+            f"SoC={soc}% ≤ weather floor {discharge_floor}% → hold for tomorrow's load"
+        )
+        return "self_consumption"
+
+    # --- Price lookahead ---
+    forecast = get_forecast_earn(lookahead_intervals=6)
     if forecast:
         best_forecast = max(forecast)
         if best_forecast > earn_now * hold_ratio:
-            # A significantly better price is coming in the next 30 min — wait
             log.info(
                 f"Lookahead: earn_now={earn_now:.2f}c, "
                 f"best_forecast={best_forecast:.2f}c in 30min → HOLD for better price"
             )
             return "self_consumption"
 
-    # Current price is good and nothing much better coming — export now
     log.info(f"Export decision: earn={earn_now:.2f}c/kWh ≥ {export_threshold}c threshold → discharge")
     return "discharge"
 
@@ -505,6 +618,7 @@ def save_state(action: str, spot_price: float, soc: int, feed_in_price: float = 
             "soc_min": SOC_MIN,
             "soc_max": SOC_MAX,
         },
+        "solar_forecast": get_solar_forecast(),
     }
     try:
         with open(state_file, "w") as f:
