@@ -10,3 +10,5 @@ smartshift.log
 uv.lock
 smartshift.log
 .current_state.json
+.ha_token
+.ha_refresh_token

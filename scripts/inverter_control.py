@@ -304,8 +304,11 @@ def get_battery_config() -> dict:
 
 WORK_MODE_MAP = {
     "self_consumption": 2,  # PV → home → battery → grid (inverter default)
-    "discharge": 5,         # TOU mode — force battery export to grid at peak price
-    "charge": 5,            # TOU mode — force battery charge (from PV/grid)
+    "discharge": 2,         # Self-consumption — battery covers load + exports surplus
+    "charge": 2,            # Self-consumption — PV charges battery naturally
+    # NOTE: TOU (mod_r=5) does NOT reliably trigger discharge on AISWEI ASW12kH-T3.
+    # Self-consumption (mod_r=2) actually discharges battery to cover home load
+    # and exports surplus to grid. Tested 2026-04-01: 1499W discharge confirmed in mod_r=2.
 }
 
 
