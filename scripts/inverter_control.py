@@ -304,8 +304,8 @@ def get_battery_config() -> dict:
 
 WORK_MODE_MAP = {
     "self_consumption": 2,  # PV → home → battery → grid (inverter default)
-    "discharge": 2,         # Same as self_consumption — battery covers load + exports surplus
-    "charge": 2,            # No grid charging — charge only from PV (self_consumption handles it)
+    "discharge": 5,         # TOU mode — force battery export to grid at peak price
+    "charge": 5,            # TOU mode — force battery charge (from PV/grid)
 }
 
 
@@ -391,11 +391,25 @@ def set_work_mode(mode: str, dry_run: bool = False) -> bool:
 
     log.info(f"Setting battery mode: {mode} (mod_r={mod_r})")
     try:
-        r = _setbattery(mod_r)
+        if mod_r == 5:
+            # TOU requires mode cycle: set self_consumption first, then TOU
+            # This re-triggers the TOU engine on the inverter
+            current = get_current_mod_r()
+            if current == 5:
+                log.info("Already in TOU mode — cycling via self_consumption first")
+                r = _setbattery(2)
+                if r.get("dat") != "ok":
+                    log.error(f"Cycle to self_consumption failed: {r}")
+                    return False
+                import time as _t; _t.sleep(2)  # ESP32 needs settling time
+            r = _setbattery(5)
+        else:
+            r = _setbattery(mod_r)
+
         if r.get("dat") != "ok":
             log.error(f"setbattery failed: {r}")
             return False
-        log.info(f"Battery mode set to {mode} ✓")
+        log.info(f"Battery mode set to {mode} (mod_r={mod_r}) ✓")
         return True
     except Exception as e:
         log.error(f"Failed to set work mode: {e}")
