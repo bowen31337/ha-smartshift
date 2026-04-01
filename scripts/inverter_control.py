@@ -411,8 +411,8 @@ def set_work_mode(mode: str, dry_run: bool = False) -> bool:
 SOLAR_CAPACITY_KW = float(os.environ.get("SOLAR_CAPACITY_KW", "20.0"))  # panel max output
 BATTERY_CAPACITY_KWH = float(os.environ.get("BATTERY_CAPACITY_KWH", "46.0"))
 # Kellyville NSW default coords
-LATITUDE = float(os.environ.get("LATITUDE", "-33.73"))
-LONGITUDE = float(os.environ.get("LONGITUDE", "150.97"))
+LATITUDE = float(os.environ.get("LATITUDE", "-33.7114"))
+LONGITUDE = float(os.environ.get("LONGITUDE", "150.9457"))
 
 
 def get_solar_forecast() -> dict:
