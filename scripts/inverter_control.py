@@ -532,6 +532,32 @@ def get_forecast_earn(lookahead_intervals: int = 6) -> list[float]:
         return []
 
 
+ADVICE_FILE = "/tmp/smartshift-advice.json"
+ADVICE_MAX_AGE_S = 1800  # 30 min — stale advice is ignored
+
+
+def _load_advice() -> dict:
+    """Load AI advisor recommendations. Returns {} if missing/stale/invalid."""
+    try:
+        if not os.path.exists(ADVICE_FILE):
+            return {}
+        age = time.time() - os.path.getmtime(ADVICE_FILE)
+        if age > ADVICE_MAX_AGE_S:
+            log.info(f"AI advice stale ({age:.0f}s old > {ADVICE_MAX_AGE_S}s) — using defaults")
+            return {}
+        with open(ADVICE_FILE) as f:
+            advice = json.load(f)
+        # Clamp safety bounds (belt-and-suspenders, write_advice.py also clamps)
+        if "export_threshold" in advice:
+            advice["export_threshold"] = max(3.0, min(30.0, float(advice["export_threshold"])))
+        if "discharge_floor" in advice:
+            advice["discharge_floor"] = max(SOC_MIN, min(60.0, float(advice["discharge_floor"])))
+        return advice
+    except Exception as e:
+        log.warning(f"Could not load AI advice: {e}")
+        return {}
+
+
 def decide_action(spot_price: float, soc: int, feed_in_price: float = 0.0) -> str:
     """
     Decide battery action to maximise profit on 46kWh battery.
@@ -554,10 +580,22 @@ def decide_action(spot_price: float, soc: int, feed_in_price: float = 0.0) -> st
     Safety:
     - NEVER discharge below SOC_MIN (5%)
     """
+    # --- Load AI advisor recommendations (if available) ---
+    advice = _load_advice()
     export_threshold = float(os.environ.get("EXPORT_THRESHOLD", "10.0"))
     hold_ratio = float(os.environ.get("HOLD_RATIO", "1.3"))
     soc_floor_cloudy = float(os.environ.get("SOC_FLOOR_CLOUDY", "30"))
     soc_floor_partly = float(os.environ.get("SOC_FLOOR_PARTLY", "20"))
+
+    if advice:
+        # Override thresholds with AI recommendations (already clamped by write_advice.py)
+        export_threshold = advice.get("export_threshold", export_threshold)
+        discharge_floor_override = advice.get("discharge_floor")
+        strategy = advice.get("strategy", "")
+        log.info(
+            f"AI advisor: strategy={strategy}, threshold={export_threshold}c, "
+            f"floor={discharge_floor_override}%, confidence={advice.get('confidence', '?')}"
+        )
 
     # --- Edge case: negative spot price (grid pays you to consume) ---
     # When spot price is negative or near-zero, grid is literally paying us to take power.
@@ -583,7 +621,11 @@ def decide_action(spot_price: float, soc: int, feed_in_price: float = 0.0) -> st
     solar = get_solar_forecast()
     discharge_floor = SOC_MIN  # default: drain to minimum (sunny assumption)
 
-    if solar:
+    # AI advisor override takes priority over weather heuristic
+    if advice and "discharge_floor" in advice:
+        discharge_floor = advice["discharge_floor"]
+        log.info(f"AI advisor sets discharge floor: {discharge_floor}%")
+    elif solar:
         confidence = solar.get("confidence", "sunny")
         if confidence == "cloudy":
             discharge_floor = soc_floor_cloudy
