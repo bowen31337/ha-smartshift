@@ -303,12 +303,12 @@ def get_battery_config() -> dict:
 # or rely on mod_r=2 (self-consumption) as base
 
 WORK_MODE_MAP = {
-    "self_consumption": 2,  # PV → home → battery → grid (inverter default)
-    "discharge": 2,         # Self-consumption — battery covers load + exports surplus
-    "charge": 2,            # Self-consumption — PV charges battery naturally
-    # NOTE: TOU (mod_r=5) does NOT reliably trigger discharge on AISWEI ASW12kH-T3.
-    # Self-consumption (mod_r=2) actually discharges battery to cover home load
-    # and exports surplus to grid. Tested 2026-04-01: 1499W discharge confirmed in mod_r=2.
+    "self_consumption": 2,  # PV → home → battery → grid (inverter default, covers home load only)
+    "discharge": 4,         # Custom mode — FORCE discharge to grid via setdefine schedule
+    "charge": 4,            # Custom mode — FORCE charge via setdefine schedule
+    # NOTE: TOU (mod_r=5) does NOT work on AISWEI ASW12kH-T3 firmware V610-90002-12.
+    # Custom mode (mod_r=4) + setdefine schedule = force grid export. 5045W confirmed.
+    # Credit: https://github.com/ilikedata/amber-solplanet
 }
 
 
@@ -394,21 +394,48 @@ def set_work_mode(mode: str, dry_run: bool = False) -> bool:
 
     log.info(f"Setting battery mode: {mode} (mod_r={mod_r})")
     try:
-        if mod_r == 5:
-            # TOU requires mode cycle: set self_consumption first, then TOU
-            # This re-triggers the TOU engine on the inverter
-            current = get_current_mod_r()
-            if current == 5:
-                log.info("Already in TOU mode — cycling via self_consumption first")
-                r = _setbattery(2)
-                if r.get("dat") != "ok":
-                    log.error(f"Cycle to self_consumption failed: {r}")
-                    return False
-                import time as _t; _t.sleep(2)  # ESP32 needs settling time
-            r = _setbattery(5)
-        else:
-            r = _setbattery(mod_r)
+        if mod_r == 4:
+            # Custom mode: write a short discharge/charge schedule slot, then set mod_r=4.
+            # The slot is backdated by 30min so it naturally expires if automation fails.
+            # Credit: https://github.com/ilikedata/amber-solplanet
+            from datetime import datetime as _dt
+            now = _dt.now()
+            DAYS = ["Mon", "Tus", "Wen", "Thu", "Fri", "Sat", "Sun"]
+            day = DAYS[now.weekday()]
 
+            # Backdate slot start by 30 min for safety
+            slot_hour = now.hour
+            slot_min = 0 if now.minute < 30 else 30
+            if slot_min == 30:
+                slot_min = 0
+            elif slot_hour > 0:
+                slot_hour -= 1
+                slot_min = 30
+            else:
+                slot_min = 0  # midnight edge case
+
+            # Encode slot
+            BASE = 0x3C02
+            HOUR_MULT = 0x1000000
+            HALF_MULT = 0x1E0000
+            DUR_MULT = 0x3C00
+            discharge_flag = 1 if mode == "discharge" else 0
+            slot_raw = BASE + slot_hour * HOUR_MULT + (slot_min // 30) * HALF_MULT + 0 * DUR_MULT + discharge_flag
+
+            # Build schedule: empty except for this one slot
+            schedule = {"Pin": 0 if mode == "discharge" else 5000, "Pout": 5000 if mode == "discharge" else 0}
+            for d in DAYS:
+                schedule[d] = [0, 0, 0, 0, 0, 0]
+            schedule[day] = [slot_raw, 0, 0, 0, 0, 0]
+
+            log.info(f"Custom mode schedule: {day} {slot_hour:02d}:{slot_min:02d} +1h {mode} (slot=0x{slot_raw:08X})")
+            r = _post_inverter({"action": "setdefine", "device": 4, "value": schedule})
+            if r.get("dat") != "ok":
+                log.error(f"setdefine failed: {r}")
+                return False
+            import time as _t; _t.sleep(2)
+
+        r = _setbattery(mod_r)
         if r.get("dat") != "ok":
             log.error(f"setbattery failed: {r}")
             return False
