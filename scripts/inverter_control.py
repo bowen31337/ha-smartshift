@@ -63,6 +63,7 @@ BATTERY_MOD = 9
 BATTERY_NUM = 3
 CHARGE_MAX = 100
 DISCHARGE_MAX = 10
+INVERTER_MAX_W = 12000  # AISWEI ASW12kH-T3 max AC power
 
 # ─── SSL context (skip verify for self-signed cert) ───────────────────────────
 _ssl_ctx = ssl.create_default_context()
@@ -324,6 +325,73 @@ def get_inverter_ac() -> dict:
         return {"inverter_w": 0, "temp_c": 0, "error": str(e)}
 
 
+def calc_adaptive_power(battery_data: dict) -> dict:
+    """
+    Calculate adaptive charge/discharge power limits based on real-time battery state.
+
+    Uses BMS-reported current limits (cli/clo), voltage, SoC, and temperature
+    to determine safe power levels. No LLM needed — pure physics.
+
+    Returns dict with: pin_w (charge limit), pout_w (discharge limit), reason
+    """
+    raw = battery_data.get("raw", {})
+    soc = battery_data.get("soc", 50)
+    vb = raw.get("vb", 32000) / 100       # Battery voltage (V)
+    tb = raw.get("tb", 250) / 10           # Temperature (°C)
+    cli = raw.get("cli", 600) / 10         # BMS charge current limit (A)
+    clo = raw.get("clo", 600) / 10         # BMS discharge current limit (A)
+
+    # Start with BMS-reported limits converted to watts
+    bms_charge_w = int(cli * vb)
+    bms_discharge_w = int(clo * vb)
+
+    # Cap at inverter hardware max
+    pin_w = min(bms_charge_w, INVERTER_MAX_W)
+    pout_w = min(bms_discharge_w, INVERTER_MAX_W)
+
+    reasons = []
+
+    # Temperature derating: reduce power if battery too hot or cold
+    if tb >= 45:
+        pin_w = min(pin_w, 5000)
+        pout_w = min(pout_w, 5000)
+        reasons.append(f"temp_derate({tb}°C)")
+    elif tb >= 40:
+        pin_w = int(pin_w * 0.7)
+        pout_w = int(pout_w * 0.7)
+        reasons.append(f"temp_reduce({tb}°C)")
+    elif tb <= 5:
+        pin_w = min(pin_w, 3000)
+        reasons.append(f"cold_charge_limit({tb}°C)")
+
+    # SoC-based tapering (protect battery longevity)
+    # Discharge: taper below 15% SoC
+    if soc <= 10:
+        pout_w = min(pout_w, 3000)
+        reasons.append(f"low_soc_taper({soc}%)")
+    elif soc <= 15:
+        pout_w = min(pout_w, int(INVERTER_MAX_W * 0.5))
+        reasons.append(f"soc_taper({soc}%)")
+
+    # Charge: taper above 90% (CV phase)
+    if soc >= 95:
+        pin_w = min(pin_w, 3000)
+        reasons.append(f"high_soc_taper({soc}%)")
+    elif soc >= 90:
+        pin_w = min(pin_w, int(INVERTER_MAX_W * 0.5))
+        reasons.append(f"soc_cv_phase({soc}%)")
+
+    # Round to nearest 500W for clean API values
+    pin_w = max(1000, (pin_w // 500) * 500)
+    pout_w = max(1000, (pout_w // 500) * 500)
+
+    reason = ", ".join(reasons) if reasons else "nominal"
+    log.info(f"Adaptive power: Pin={pin_w}W, Pout={pout_w}W ({reason})")
+
+    return {"pin_w": pin_w, "pout_w": pout_w, "reason": reason,
+            "bms_charge_limit_a": cli, "bms_discharge_limit_a": clo}
+
+
 def get_battery_config() -> dict:
     """
     Query inverter for battery configuration (work mode, muf, mod, num, etc.)
@@ -416,7 +484,7 @@ def get_current_mod_r() -> int:
         return -1
 
 
-def set_work_mode(mode: str, dry_run: bool = False) -> bool:
+def set_work_mode(mode: str, dry_run: bool = False, battery: dict = None) -> bool:
     """
     Set inverter battery work mode.
     mode: 'self_consumption' | 'charge' | 'discharge'
@@ -469,7 +537,13 @@ def set_work_mode(mode: str, dry_run: bool = False) -> bool:
             slot_raw = BASE + slot_hour * HOUR_MULT + (slot_min // 30) * HALF_MULT + 0 * DUR_MULT + discharge_flag
 
             # Build schedule: empty except for this one slot
-            schedule = {"Pin": 0 if mode == "discharge" else 10000, "Pout": 10000 if mode == "discharge" else 0}
+            # Adaptive power limits based on real-time battery state
+            _bat = battery if battery else get_battery_state()
+            adaptive = calc_adaptive_power(_bat)
+            if mode == "discharge":
+                schedule = {"Pin": 0, "Pout": adaptive["pout_w"]}
+            else:  # charge
+                schedule = {"Pin": adaptive["pin_w"], "Pout": 0}
             for d in DAYS:
                 schedule[d] = [0, 0, 0, 0, 0, 0]
             schedule[day] = [slot_raw, 0, 0, 0, 0, 0]
@@ -833,12 +907,15 @@ def run(args) -> int:
     # Query grid meter for full power flow picture
     grid = get_grid_meter()
 
+    # Calculate adaptive power limits for logging
+    adaptive = calc_adaptive_power(battery)
+
     # Save state for HA sensors (now includes grid + battery power)
     save_state(action, spot_price, soc, feed_in_price,
                grid_data=grid, battery_power=power)
 
     # Apply the mode
-    success = set_work_mode(action, dry_run=args.dry_run)
+    success = set_work_mode(action, dry_run=args.dry_run, battery=battery)
 
     if success:
         log.info(f"✓ Battery mode: {action} | Spot: {spot_price:.2f}c/kWh | SoC: {soc}%")
