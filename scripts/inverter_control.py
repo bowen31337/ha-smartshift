@@ -469,7 +469,7 @@ def set_work_mode(mode: str, dry_run: bool = False) -> bool:
             slot_raw = BASE + slot_hour * HOUR_MULT + (slot_min // 30) * HALF_MULT + 0 * DUR_MULT + discharge_flag
 
             # Build schedule: empty except for this one slot
-            schedule = {"Pin": 0 if mode == "discharge" else 5000, "Pout": 5000 if mode == "discharge" else 0}
+            schedule = {"Pin": 0 if mode == "discharge" else 10000, "Pout": 10000 if mode == "discharge" else 0}
             for d in DAYS:
                 schedule[d] = [0, 0, 0, 0, 0, 0]
             schedule[day] = [slot_raw, 0, 0, 0, 0, 0]
