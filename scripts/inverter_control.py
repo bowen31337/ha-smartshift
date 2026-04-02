@@ -278,6 +278,52 @@ def get_battery_state() -> dict:
             return {"soc": 50, "power": 0, "raw": {}, "error": str(e)}
 
 
+def get_grid_meter() -> dict:
+    """
+    Query smart meter (device=3) for grid import/export and house load.
+    Returns dict with: grid_w (negative=exporting), phases, export_today_kwh, import_today_kwh
+    """
+    url = f"{INVERTER_URL}/getdevdata.cgi?device=3&sn={INVERTER_SN}"
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, context=_ssl_ctx, timeout=5) as resp:
+            data = json.loads(resp.read())
+            grid_w = int(data.get("pac", 0))  # negative = exporting to grid
+            phases = data.get("pac_phs", [0, 0, 0])
+            export_today = round(data.get("otd", 0) / 100, 2)  # convert to kWh
+            import_today = round(data.get("itd", 0) / 100, 2)
+            log.info(f"Grid: {grid_w}W (export_today={export_today}kWh, import_today={import_today}kWh)")
+            return {
+                "grid_w": grid_w,
+                "phases_w": phases,
+                "export_today_kwh": export_today,
+                "import_today_kwh": import_today,
+                "raw": data,
+            }
+    except Exception as e:
+        log.warning(f"Failed to get grid meter: {e}")
+        return {"grid_w": 0, "phases_w": [0, 0, 0], "export_today_kwh": 0, "import_today_kwh": 0, "error": str(e)}
+
+
+def get_inverter_ac() -> dict:
+    """
+    Query inverter AC side (device=2) for total inverter throughput.
+    Returns dict with: inverter_w, temp_c
+    """
+    url = f"{INVERTER_URL}/getdevdata.cgi?device=2&sn={INVERTER_SN}"
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, context=_ssl_ctx, timeout=5) as resp:
+            data = json.loads(resp.read())
+            pac = int(data.get("pac", 0))  # negative = generating
+            tmp = round(data.get("tmp", 0) / 10, 1)  # temp in 0.1°C
+            log.info(f"Inverter AC: {pac}W, temp={tmp}°C")
+            return {"inverter_w": pac, "temp_c": tmp, "raw": data}
+    except Exception as e:
+        log.warning(f"Failed to get inverter AC data: {e}")
+        return {"inverter_w": 0, "temp_c": 0, "error": str(e)}
+
+
 def get_battery_config() -> dict:
     """
     Query inverter for battery configuration (work mode, muf, mod, num, etc.)
@@ -696,12 +742,14 @@ def decide_action(spot_price: float, soc: int, feed_in_price: float = 0.0) -> st
     return "discharge"
 
 
-def save_state(action: str, spot_price: float, soc: int, feed_in_price: float = 0.0) -> None:
+def save_state(action: str, spot_price: float, soc: int, feed_in_price: float = 0.0,
+               grid_data: dict = None, battery_power: int = 0) -> None:
     """Save current state to a JSON file for HA sensor pickup."""
     state_file = os.environ.get(
         "STATE_FILE",
         "/home/bowen/ha-smartshift/.current_state.json"
     )
+    grid = grid_data or {}
     state = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "action": action,
@@ -709,6 +757,10 @@ def save_state(action: str, spot_price: float, soc: int, feed_in_price: float = 
         "feed_in_ckwh": round(feed_in_price, 3),
         "export_earn_ckwh": round(-feed_in_price, 3),
         "soc_pct": soc,
+        "battery_w": battery_power,
+        "grid_w": grid.get("grid_w", 0),
+        "grid_export_today_kwh": grid.get("export_today_kwh", 0),
+        "grid_import_today_kwh": grid.get("import_today_kwh", 0),
         "thresholds": {
             "charge_below": CHARGE_THRESHOLD,
             "discharge_above": PEAK_THRESHOLD,
@@ -778,8 +830,12 @@ def run(args) -> int:
             action = "self_consumption"
         log.info(f"Manual mode: {action}")
 
-    # Save state for HA sensors
-    save_state(action, spot_price, soc, feed_in_price)
+    # Query grid meter for full power flow picture
+    grid = get_grid_meter()
+
+    # Save state for HA sensors (now includes grid + battery power)
+    save_state(action, spot_price, soc, feed_in_price,
+               grid_data=grid, battery_power=power)
 
     # Apply the mode
     success = set_work_mode(action, dry_run=args.dry_run)
@@ -814,17 +870,30 @@ def main():
 
     if args.status:
         battery = get_battery_state()
+        grid = get_grid_meter()
+        grid_w = grid.get("grid_w", 0)
+        bat_w = battery.get("power", 0)
         try:
-            spot = get_spot_price()
-            action = decide_action(spot, battery["soc"])
+            spot, feed_in = get_prices()
+            earn = -feed_in
+            action = decide_action(spot, battery["soc"], feed_in)
             print(json.dumps({
                 "soc": battery["soc"],
-                "power_w": battery["power"],
+                "battery_w": bat_w,
+                "grid_w": grid_w,
+                "grid_export_today_kwh": grid.get("export_today_kwh", 0),
+                "grid_import_today_kwh": grid.get("import_today_kwh", 0),
                 "spot_price_ckwh": round(spot, 3),
+                "earn_ckwh": round(earn, 3),
                 "recommended_action": action,
             }, indent=2))
         except Exception as e:
-            print(json.dumps({"error": str(e), "soc": battery["soc"]}))
+            print(json.dumps({
+                "error": str(e),
+                "soc": battery["soc"],
+                "battery_w": bat_w,
+                "grid_w": grid_w,
+            }, indent=2))
         return
 
     sys.exit(run(args))
