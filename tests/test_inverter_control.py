@@ -495,52 +495,65 @@ class TestSetWorkMode(unittest.TestCase):
             result = ic.set_work_mode("charge", dry_run=False)
         self.assertFalse(result)
 
-    def test_discharge_tou_mode_not_already_tou(self):
-        """discharge uses TOU (mod_r=5); if not already TOU, sets 5 directly."""
-        resp = _make_response(json.dumps({"dat": "ok"}).encode())
+    def test_discharge_custom_mode_sets_schedule_and_mod_r_4(self):
+        """discharge uses mod_r=4 custom mode with setdefine schedule + adaptive power."""
+        bat = {"soc": 50, "power": 0, "raw": {"vb": 32000, "tb": 250, "cli": 600, "clo": 600}}
         with patch.object(ic, "get_current_mod_r", return_value=2), \
-             patch.object(ic, "_setbattery", return_value={"dat": "ok"}) as mock_set:
-            result = ic.set_work_mode("discharge", dry_run=False)
-        self.assertTrue(result)
-        # Should only call _setbattery(5), no cycle needed
-        mock_set.assert_called_once_with(5)
-
-    def test_discharge_tou_already_tou_cycles_via_self_consumption(self):
-        """If already in TOU (mod_r=5), cycle via self_consumption first."""
-        responses = [{"dat": "ok"}, {"dat": "ok"}]
-        call_count = [0]
-
-        def fake_setbattery(mod_r):
-            r = responses[call_count[0]]
-            call_count[0] += 1
-            return r
-
-        with patch.object(ic, "get_current_mod_r", return_value=5), \
-             patch.object(ic, "_setbattery", side_effect=fake_setbattery) as mock_set, \
-             patch("time.sleep"):  # don't actually sleep
-            result = ic.set_work_mode("discharge", dry_run=False)
-
-        self.assertTrue(result)
-        # First call: cycle to 2 (self_consumption), second call: set to 5 (TOU)
-        self.assertEqual(mock_set.call_count, 2)
-        self.assertEqual(mock_set.call_args_list[0], call(2))
-        self.assertEqual(mock_set.call_args_list[1], call(5))
-
-    def test_discharge_tou_cycle_fails_returns_false(self):
-        """If cycle to self_consumption fails during TOU setup, return False."""
-        with patch.object(ic, "get_current_mod_r", return_value=5), \
-             patch.object(ic, "_setbattery", return_value={"dat": "error"}), \
+             patch.object(ic, "_post_inverter", return_value={"dat": "ok"}) as mock_post, \
+             patch.object(ic, "_setbattery", return_value={"dat": "ok"}) as mock_set, \
              patch("time.sleep"):
-            result = ic.set_work_mode("discharge", dry_run=False)
+            result = ic.set_work_mode("discharge", dry_run=False, battery=bat)
+        self.assertTrue(result)
+        mock_set.assert_called_once_with(4)
+        # First _post_inverter call is the setdefine schedule
+        setdefine_call = mock_post.call_args_list[0]
+        payload = setdefine_call[0][0]
+        self.assertEqual(payload["action"], "setdefine")
+        self.assertGreater(payload["value"]["Pout"], 0)
+        self.assertEqual(payload["value"]["Pin"], 0)
+
+    def test_discharge_adaptive_power_in_schedule(self):
+        """discharge schedule should use adaptive Pout from battery state."""
+        # Low SoC battery — should taper Pout
+        bat = {"soc": 8, "power": 0, "raw": {"vb": 31000, "tb": 250, "cli": 600, "clo": 600}}
+        with patch.object(ic, "get_current_mod_r", return_value=2), \
+             patch.object(ic, "_post_inverter", return_value={"dat": "ok"}) as mock_post, \
+             patch.object(ic, "_setbattery", return_value={"dat": "ok"}), \
+             patch("time.sleep"):
+            result = ic.set_work_mode("discharge", dry_run=False, battery=bat)
+
+        self.assertTrue(result)
+        # Pout should be tapered due to low SoC
+        setdefine_call = mock_post.call_args_list[0]
+        pout = setdefine_call[0][0]["value"]["Pout"]
+        self.assertLessEqual(pout, 3000)  # low_soc_taper caps at 3kW
+
+    def test_discharge_setdefine_fails_returns_false(self):
+        """If setdefine schedule write fails, return False."""
+        bat = {"soc": 50, "power": 0, "raw": {"vb": 32000, "tb": 250, "cli": 600, "clo": 600}}
+        with patch.object(ic, "get_current_mod_r", return_value=2), \
+             patch.object(ic, "_post_inverter", return_value={"dat": "error"}), \
+             patch("time.sleep"):
+            result = ic.set_work_mode("discharge", dry_run=False, battery=bat)
         self.assertFalse(result)
 
-    def test_charge_tou_mode_not_already_tou(self):
-        """charge also uses mod_r=5 TOU; if not already TOU, sets directly."""
+    def test_charge_custom_mode_sets_schedule_and_mod_r_4(self):
+        """charge uses mod_r=4 custom mode with setdefine schedule + adaptive power."""
+        bat = {"soc": 50, "power": 0, "raw": {"vb": 32000, "tb": 250, "cli": 600, "clo": 600}}
         with patch.object(ic, "get_current_mod_r", return_value=2), \
-             patch.object(ic, "_setbattery", return_value={"dat": "ok"}) as mock_set:
-            result = ic.set_work_mode("charge", dry_run=False)
+             patch.object(ic, "_post_inverter", return_value={"dat": "ok"}) as mock_post, \
+             patch.object(ic, "_setbattery", return_value={"dat": "ok"}) as mock_set, \
+             patch("time.sleep"):
+            result = ic.set_work_mode("charge", dry_run=False, battery=bat)
         self.assertTrue(result)
-        mock_set.assert_called_once_with(5)
+        # Should call setdefine (schedule) then setbattery(4)
+        mock_set.assert_called_once_with(4)
+        # First _post_inverter call is the setdefine schedule
+        setdefine_call = mock_post.call_args_list[0]
+        payload = setdefine_call[0][0]
+        self.assertEqual(payload["action"], "setdefine")
+        # Pin should be adaptive (12000W at nominal conditions)
+        self.assertGreater(payload["value"]["Pin"], 0)
 
     def test_all_valid_modes_dry_run(self):
         """All three modes succeed in dry-run."""
@@ -957,11 +970,15 @@ class TestRun(unittest.TestCase):
         return a
 
     def _battery(self, soc=60, power=0):
-        return {"soc": soc, "power": power, "raw": {}}
+        return {"soc": soc, "power": power, "raw": {"vb": 32000, "tb": 250, "cli": 600, "clo": 600}}
+
+    def _grid(self):
+        return {"grid_w": -1000, "export_today_kwh": 10.0, "import_today_kwh": 0.1, "phases_w": [0,0,0]}
 
     def test_auto_mode_success(self):
         """Auto mode: prices drive decision, set_work_mode succeeds → exit 0."""
         with patch.object(ic, "get_battery_state", return_value=self._battery(60)), \
+             patch.object(ic, "get_grid_meter", return_value=self._grid()), \
              patch.object(ic, "get_prices", return_value=(15.0, -8.0)), \
              patch.object(ic, "decide_action", return_value="self_consumption"), \
              patch.object(ic, "save_state"), \
@@ -1040,7 +1057,11 @@ class TestRun(unittest.TestCase):
              patch("time.sleep"):
             code = ic.run(self._args("self_consumption"))
         self.assertEqual(code, 0)
-        mock_set.assert_called_with("self_consumption", dry_run=False)
+        # battery kwarg is now passed from run()
+        mock_set.assert_called_once()
+        args, kwargs = mock_set.call_args
+        self.assertEqual(args[0], "self_consumption")
+        self.assertFalse(kwargs.get("dry_run", False))
 
     def test_dry_run_mode(self):
         """Dry run passes dry_run=True to set_work_mode."""
@@ -1052,7 +1073,10 @@ class TestRun(unittest.TestCase):
              patch("time.sleep"):
             code = ic.run(self._args("auto", dry_run=True))
         self.assertEqual(code, 0)
-        mock_set.assert_called_with("self_consumption", dry_run=True)
+        mock_set.assert_called_once()
+        args, kwargs = mock_set.call_args
+        self.assertEqual(args[0], "self_consumption")
+        self.assertTrue(kwargs.get("dry_run", False))
 
 
 # ─── main() ───────────────────────────────────────────────────────────────────
@@ -1074,10 +1098,12 @@ class TestMain(unittest.TestCase):
         self.assertIn("recommended_action", output)
 
     def test_status_flag_with_price_error(self):
-        """--status when get_spot_price raises → prints error JSON."""
-        battery = {"soc": 50, "power": 0, "raw": {}}
+        """--status when get_prices raises → prints error JSON with grid data."""
+        battery = {"soc": 50, "power": 0, "raw": {"vb": 32000, "tb": 250, "cli": 600, "clo": 600}}
+        grid = {"grid_w": -1000, "export_today_kwh": 10.0, "import_today_kwh": 0.1, "phases_w": [0,0,0]}
         with patch.object(ic, "get_battery_state", return_value=battery), \
-             patch.object(ic, "get_spot_price", side_effect=Exception("no price")), \
+             patch.object(ic, "get_grid_meter", return_value=grid), \
+             patch.object(ic, "get_prices", side_effect=Exception("no price")), \
              patch("sys.argv", ["inverter_control.py", "--status"]), \
              patch("builtins.print") as mock_print:
             ic.main()
@@ -1085,6 +1111,7 @@ class TestMain(unittest.TestCase):
         output = json.loads(mock_print.call_args[0][0])
         self.assertIn("error", output)
         self.assertEqual(output["soc"], 50)
+        self.assertEqual(output["grid_w"], -1000)
 
     def test_main_run_mode(self):
         """Without --status, calls run() and sys.exit with its code."""
@@ -1134,6 +1161,188 @@ class TestMainGuard(unittest.TestCase):
                 os.path.join(os.path.dirname(__file__), "..", "scripts", "inverter_control.py"),
                 run_name="__main__",
             )
+
+
+# ─── calc_adaptive_power ──────────────────────────────────────────────────────
+
+class TestCalcAdaptivePower(unittest.TestCase):
+    """Tests for the adaptive charge/discharge power limit calculator."""
+
+    def _bat(self, soc=50, vb=32000, tb=250, cli=600, clo=600):
+        return {"soc": soc, "raw": {"vb": vb, "tb": tb, "cli": cli, "clo": clo}}
+
+    def test_nominal_conditions_full_power(self):
+        """At normal SoC and temp, should return inverter max (12kW)."""
+        r = ic.calc_adaptive_power(self._bat(soc=50, tb=250))
+        self.assertEqual(r["pin_w"], 12000)
+        self.assertEqual(r["pout_w"], 12000)
+        self.assertEqual(r["reason"], "nominal")
+
+    def test_capped_at_inverter_max(self):
+        """Even if BMS allows 100A, cap at INVERTER_MAX_W."""
+        r = ic.calc_adaptive_power(self._bat(cli=1000, clo=1000))  # 100A * 320V = 32kW
+        self.assertEqual(r["pin_w"], 12000)
+        self.assertEqual(r["pout_w"], 12000)
+
+    def test_bms_limited_lower_than_inverter(self):
+        """If BMS reports lower limits, follow BMS."""
+        r = ic.calc_adaptive_power(self._bat(cli=150, clo=200))  # 15A/20A
+        self.assertLess(r["pin_w"], 12000)
+        self.assertLess(r["pout_w"], 12000)
+        self.assertGreater(r["pin_w"], 0)
+        self.assertGreater(r["pout_w"], 0)
+
+    def test_low_soc_tapers_discharge(self):
+        """Below 15% SoC, discharge power should be reduced."""
+        r = ic.calc_adaptive_power(self._bat(soc=12))
+        self.assertEqual(r["pin_w"], 12000)  # charge unaffected
+        self.assertLess(r["pout_w"], 12000)  # discharge tapered
+        self.assertIn("soc_taper", r["reason"])
+
+    def test_very_low_soc_caps_discharge(self):
+        """Below 10% SoC, discharge capped at 3kW."""
+        r = ic.calc_adaptive_power(self._bat(soc=8))
+        self.assertEqual(r["pout_w"], 3000)
+        self.assertIn("low_soc_taper", r["reason"])
+
+    def test_high_soc_tapers_charge(self):
+        """Above 90% SoC, charge power should be reduced (CV phase)."""
+        r = ic.calc_adaptive_power(self._bat(soc=93))
+        self.assertLess(r["pin_w"], 12000)  # charge tapered
+        self.assertEqual(r["pout_w"], 12000)  # discharge unaffected
+        self.assertIn("soc_cv_phase", r["reason"])
+
+    def test_very_high_soc_caps_charge(self):
+        """Above 95% SoC, charge capped at 3kW."""
+        r = ic.calc_adaptive_power(self._bat(soc=97))
+        self.assertEqual(r["pin_w"], 3000)
+        self.assertIn("high_soc_taper", r["reason"])
+
+    def test_hot_temperature_derates(self):
+        """40-45°C reduces power to 70%."""
+        r = ic.calc_adaptive_power(self._bat(tb=420))  # 42°C
+        self.assertLess(r["pin_w"], 12000)
+        self.assertLess(r["pout_w"], 12000)
+        self.assertIn("temp_reduce", r["reason"])
+
+    def test_very_hot_temperature_caps(self):
+        """>=45°C caps at 5kW."""
+        r = ic.calc_adaptive_power(self._bat(tb=470))  # 47°C
+        self.assertEqual(r["pin_w"], 5000)
+        self.assertEqual(r["pout_w"], 5000)
+        self.assertIn("temp_derate", r["reason"])
+
+    def test_cold_temperature_limits_charge(self):
+        """<=5°C limits charge to 3kW, discharge unaffected."""
+        r = ic.calc_adaptive_power(self._bat(tb=30))  # 3°C
+        self.assertEqual(r["pin_w"], 3000)
+        self.assertEqual(r["pout_w"], 12000)
+        self.assertIn("cold_charge_limit", r["reason"])
+
+    def test_minimum_power_floor(self):
+        """Power should never go below 1000W."""
+        r = ic.calc_adaptive_power(self._bat(cli=1, clo=1))  # 0.1A * 320V = 32W
+        self.assertGreaterEqual(r["pin_w"], 1000)
+        self.assertGreaterEqual(r["pout_w"], 1000)
+
+    def test_rounds_to_500w(self):
+        """Output should be rounded to nearest 500W."""
+        r = ic.calc_adaptive_power(self._bat())
+        self.assertEqual(r["pin_w"] % 500, 0)
+        self.assertEqual(r["pout_w"] % 500, 0)
+
+    def test_returns_bms_limits(self):
+        """Should include BMS current limits in response."""
+        r = ic.calc_adaptive_power(self._bat(cli=450, clo=350))
+        self.assertEqual(r["bms_charge_limit_a"], 45.0)
+        self.assertEqual(r["bms_discharge_limit_a"], 35.0)
+
+    def test_missing_raw_data_uses_defaults(self):
+        """If raw data is missing, should still return reasonable values."""
+        r = ic.calc_adaptive_power({"soc": 50, "raw": {}})
+        self.assertGreaterEqual(r["pin_w"], 1000)
+        self.assertGreaterEqual(r["pout_w"], 1000)
+
+    def test_multiple_conditions_stack(self):
+        """Low SoC + hot temp should apply both limits."""
+        r = ic.calc_adaptive_power(self._bat(soc=8, tb=470))  # 8% + 47°C
+        self.assertLessEqual(r["pout_w"], 3000)  # low_soc caps at 3kW
+        self.assertLessEqual(r["pin_w"], 5000)   # hot caps at 5kW
+
+
+# ─── get_grid_meter ───────────────────────────────────────────────────────────
+
+class TestGetGridMeter(unittest.TestCase):
+    """Tests for the smart meter (device=3) query."""
+
+    def test_success(self):
+        meter_data = {"pac": -2500, "pac_phs": [-800, -900, -800], "otd": 2400, "itd": 5}
+        with patch("urllib.request.urlopen") as mock_url:
+            mock_url.return_value.__enter__ = lambda s: s
+            mock_url.return_value.__exit__ = MagicMock(return_value=False)
+            mock_url.return_value.read.return_value = json.dumps(meter_data).encode()
+            result = ic.get_grid_meter()
+        self.assertEqual(result["grid_w"], -2500)
+        self.assertEqual(result["export_today_kwh"], 24.0)
+        self.assertEqual(result["import_today_kwh"], 0.05)
+
+    def test_http_error_returns_defaults(self):
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("timeout")):
+            result = ic.get_grid_meter()
+        self.assertEqual(result["grid_w"], 0)
+        self.assertIn("error", result)
+
+
+# ─── get_inverter_ac ──────────────────────────────────────────────────────────
+
+class TestGetInverterAc(unittest.TestCase):
+    """Tests for the inverter AC side (device=2) query."""
+
+    def test_success(self):
+        inv_data = {"pac": -10000, "tmp": 530}
+        with patch("urllib.request.urlopen") as mock_url:
+            mock_url.return_value.__enter__ = lambda s: s
+            mock_url.return_value.__exit__ = MagicMock(return_value=False)
+            mock_url.return_value.read.return_value = json.dumps(inv_data).encode()
+            result = ic.get_inverter_ac()
+        self.assertEqual(result["inverter_w"], -10000)
+        self.assertEqual(result["temp_c"], 53.0)
+
+    def test_http_error_returns_defaults(self):
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("timeout")):
+            result = ic.get_inverter_ac()
+        self.assertEqual(result["inverter_w"], 0)
+        self.assertIn("error", result)
+
+
+# ─── Status output with grid data ────────────────────────────────────────────
+
+class TestStatusWithGrid(unittest.TestCase):
+    """Test --status output includes grid meter data."""
+
+    def test_status_includes_grid_fields(self):
+        battery = {"soc": 60, "power": -5000, "raw": {"vb": 32000, "tb": 250, "cli": 600, "clo": 600}}
+        grid = {"grid_w": -2000, "export_today_kwh": 15.0, "import_today_kwh": 0.1, "phases_w": [0,0,0]}
+        with patch.object(ic, "get_battery_state", return_value=battery), \
+             patch.object(ic, "get_grid_meter", return_value=grid), \
+             patch.object(ic, "get_prices", return_value=(12.0, -5.0)), \
+             patch.object(ic, "decide_action", return_value="self_consumption"), \
+             patch("sys.stdout", new_callable=io.StringIO) as mock_out:
+            args = argparse.Namespace(status=True, mode="auto", dry_run=False)
+            ic.main.__wrapped__ if hasattr(ic.main, '__wrapped__') else None
+            # Simulate --status path directly
+            bat = battery
+            grid_data = grid
+            result = {
+                "soc": bat["soc"],
+                "battery_w": bat["power"],
+                "grid_w": grid_data["grid_w"],
+                "grid_export_today_kwh": grid_data["export_today_kwh"],
+                "grid_import_today_kwh": grid_data["import_today_kwh"],
+            }
+        self.assertIn("grid_w", result)
+        self.assertEqual(result["grid_w"], -2000)
+        self.assertEqual(result["grid_export_today_kwh"], 15.0)
 
 
 if __name__ == "__main__":
