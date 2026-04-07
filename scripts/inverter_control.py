@@ -53,8 +53,62 @@ SOLAR_PRESERVE_LOW = float(os.environ.get("SOLAR_PRESERVE_LOW", "15"))  # Solar 
 SOLAR_PRESERVE_HIGH = float(os.environ.get("SOLAR_PRESERVE_HIGH", "20")) # Solar window end — start releasing
 
 # Safety limits
-SOC_MIN = float(os.environ.get("SOC_MIN", "5"))    # Never discharge below (nearly empty)
+SOC_MIN = float(os.environ.get("SOC_MIN", "5"))    # Never discharge below (overridden by BMS detection)
 SOC_MAX = float(os.environ.get("SOC_MAX", "95"))   # Never charge above
+
+# BMS floor auto-detection: the inverter firmware refuses discharge below a
+# certain SoC (typically 10%). The API doesn't expose this value, so we detect
+# it empirically: when discharge mode is active but bst=1 (standby) and pb≈0,
+# the current SoC IS the BMS floor. Cache it to avoid re-detecting every cycle.
+BMS_FLOOR_FILE = os.environ.get("BMS_FLOOR_FILE", STATE_FILE.replace("current_state", "bms_floor"))
+
+def detect_bms_floor(battery: dict, current_mode: str = "") -> float:
+    """Auto-detect the BMS minimum SoC from inverter behavior.
+    
+    When discharge mode is active but battery is standby (bst=1, pb≈0),
+    the current SoC is the BMS hard floor. Cache and return it.
+    Falls back to SOC_MIN env var if detection not possible.
+    """
+    global SOC_MIN
+    raw = battery.get("raw", {})
+    bst = int(raw.get("bst", 0))  # 1 = standby
+    pb = abs(int(raw.get("pb", 0)))
+    soc = battery.get("soc", 0)
+    
+    # Check cached value first
+    try:
+        if os.path.exists(BMS_FLOOR_FILE):
+            with open(BMS_FLOOR_FILE) as f:
+                cached = json.load(f)
+            if cached.get("soc_min") and cached.get("source") == "bms_detection":
+                detected = float(cached["soc_min"])
+                if detected > SOC_MIN:
+                    SOC_MIN = detected
+                    log.info(f"BMS floor (cached): {detected}% from {cached.get('detected_at','?')}")
+                    return detected
+    except Exception:
+        pass
+    
+    # Detect: battery standby while discharge is active → BMS floor
+    if bst == 1 and pb <= 50 and current_mode in ("discharge", "home_backup") and soc > 0:
+        detected_soc = float(soc)
+        log.info(f"🔧 BMS floor detected: SoC={soc}%, bst={bst}, pb={pb}W → BMS refuses discharge at {detected_soc}%")
+        # Cache it
+        try:
+            with open(BMS_FLOOR_FILE, "w") as f:
+                json.dump({
+                    "soc_min": detected_soc,
+                    "source": "bms_detection",
+                    "detected_at": datetime.now(timezone.utc).isoformat(),
+                    "raw_bst": bst, "raw_pb": pb, "raw_soc": soc,
+                }, f, indent=2)
+        except Exception as e:
+            log.warning(f"Could not cache BMS floor: {e}")
+        if detected_soc > SOC_MIN:
+            SOC_MIN = detected_soc
+            return detected_soc
+    
+    return SOC_MIN
 SOC_PEAK_RESERVE = float(os.environ.get("SOC_PEAK_RESERVE", "80"))  # Target SoC to have at peak start
 
 # Battery config (read from inverter, these are fallback defaults)
@@ -757,7 +811,10 @@ def decide_action(spot_price: float, soc: int, feed_in_price: float = 0.0) -> st
         )
         return "charge"
 
-    # Safety floor — absolute minimum
+    # Auto-detect BMS floor from inverter behavior
+    bms_floor = detect_bms_floor({"soc": soc, "raw": {}}, current_mode="check")
+    
+    # Safety floor — absolute minimum (BMS or env override)
     if soc <= SOC_MIN:
         log.info(f"🔋 Battery critical: SoC={soc}% ≤ {SOC_MIN}% → self_consumption (grid covers load)")
         return "self_consumption"
@@ -867,6 +924,11 @@ def run(args) -> int:
         return 1
     soc = battery["soc"]
     power = battery["power"]
+
+    # Auto-detect BMS floor from inverter behavior (bst + pb while discharging)
+    # This reads the cached detection or triggers new detection
+    detect_bms_floor(battery, current_mode="check")
+    log.info(f"Effective SOC_MIN: {SOC_MIN}% (env=5, BMS detection={'active' if SOC_MIN > 5 else 'pending'})")
 
     # ESP32 has limited concurrent connections — give it a moment after reads
     import time as _t; _t.sleep(1)
