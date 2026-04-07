@@ -418,7 +418,6 @@ def get_battery_config() -> dict:
 
 WORK_MODE_MAP = {
     "self_consumption": 2,  # PV → home → battery → grid (inverter default, covers home load only)
-    "home_backup": 4,       # Custom mode — low-power discharge, battery powers home but NO grid export
     "discharge": 4,         # Custom mode — FORCE discharge to grid via setdefine schedule
     "charge": 4,            # Custom mode — FORCE charge via setdefine schedule
     # NOTE: TOU (mod_r=5) does NOT work on AISWEI ASW12kH-T3 firmware V610-90002-12.
@@ -488,7 +487,7 @@ def get_current_mod_r() -> int:
 def set_work_mode(mode: str, dry_run: bool = False, battery: dict = None) -> bool:
     """
     Set inverter battery work mode.
-    mode: 'self_consumption' | 'home_backup' | 'charge' | 'discharge'
+    mode: 'self_consumption' | 'charge' | 'discharge'
 
     Key behaviour: the AISWEI inverter requires a mode CYCLE to re-activate TOU.
     Simply writing mod_r=5 saves the setting but the TOU engine only re-triggers
@@ -541,12 +540,7 @@ def set_work_mode(mode: str, dry_run: bool = False, battery: dict = None) -> boo
             # Adaptive power limits based on real-time battery state
             _bat = battery if battery else get_battery_state()
             adaptive = calc_adaptive_power(_bat)
-            if mode == "home_backup":
-                # Low-power discharge: battery powers home but doesn't export
-                # Pout capped to typical home load (~1kW) to minimise grid export
-                home_backup_watts = int(os.environ.get("HOME_BACKUP_WATTS", "1000"))
-                schedule = {"Pin": 0, "Pout": home_backup_watts}
-            elif mode == "discharge":
+            if mode == "discharge":
                 schedule = {"Pin": 0, "Pout": adaptive["pout_w"]}
             else:  # charge
                 schedule = {"Pin": adaptive["pin_w"], "Pout": 0}
@@ -763,7 +757,7 @@ def decide_action(spot_price: float, soc: int, feed_in_price: float = 0.0) -> st
         )
         return "charge"
 
-    # Safety floor — absolute minimum, grid covers everything
+    # Safety floor — absolute minimum
     if soc <= SOC_MIN:
         log.info(f"🔋 Battery critical: SoC={soc}% ≤ {SOC_MIN}% → self_consumption (grid covers load)")
         return "self_consumption"
@@ -771,9 +765,7 @@ def decide_action(spot_price: float, soc: int, feed_in_price: float = 0.0) -> st
     earn_now = -feed_in_price
 
     if earn_now < export_threshold:
-        # Below export threshold but above SOC_MIN: battery should power home, not export
-        log.info(f"🏠 Earn={earn_now:.2f}c < {export_threshold}c threshold → home_backup (battery powers home)")
-        return "home_backup"
+        return "self_consumption"
 
     # --- Weather-adjusted discharge floor ---
     solar = get_solar_forecast()
@@ -805,9 +797,9 @@ def decide_action(spot_price: float, soc: int, feed_in_price: float = 0.0) -> st
 
     if soc <= discharge_floor:
         log.info(
-            f"SoC={soc}% ≤ weather floor {discharge_floor}% → home_backup (battery powers home, no export)"
+            f"SoC={soc}% ≤ weather floor {discharge_floor}% → hold for tomorrow's load"
         )
-        return "home_backup"
+        return "self_consumption"
 
     # --- Price lookahead ---
     forecast = get_forecast_earn(lookahead_intervals=6)
@@ -818,7 +810,7 @@ def decide_action(spot_price: float, soc: int, feed_in_price: float = 0.0) -> st
                 f"Lookahead: earn_now={earn_now:.2f}c, "
                 f"best_forecast={best_forecast:.2f}c in 30min → HOLD for better price"
             )
-            return "home_backup"
+            return "self_consumption"
 
     log.info(f"Export decision: earn={earn_now:.2f}c/kWh ≥ {export_threshold}c threshold → discharge")
     return "discharge"
