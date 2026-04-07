@@ -1,0 +1,145 @@
+# ─── Solplanet Battery Sensors for HA ──────────────────────────────────────
+# Add these to your HA configuration.yaml under the existing `rest:` section
+
+  # Battery specifications (from getdev.cgi — static, poll hourly)
+  - resource: "https://10.0.0.2/getdev.cgi?device=4&sn=OE012K01Z2610013"
+    verify_ssl: false
+    scan_interval: 3600
+    sensor:
+      - name: "Battery Max Capacity Ah"
+        unique_id: "battery_max_capacity_ah"
+        value_template: "{{ value_json.battery.capacity | int }}"
+        unit_of_measurement: "Ah"
+        icon: mdi:battery-high
+      - name: "Battery Rated Voltage"
+        unique_id: "battery_rated_voltage"
+        value_template: "{{ (value_json.battery.ratedvoltage | float / 10) | round(1) }}"
+        unit_of_measurement: "V"
+        device_class: voltage
+        icon: mdi:flash
+      - name: "Battery Max Capacity kWh"
+        unique_id: "battery_max_capacity_kwh"
+        value_template: "{{ ((value_json.battery.capacity | float) * (value_json.battery.ratedvoltage | float / 10) / 1000) | round(1) }}"
+        unit_of_measurement: "kWh"
+        device_class: energy_storage
+        icon: mdi:battery-charging-high
+      - name: "Battery Firmware"
+        unique_id: "battery_firmware"
+        value_template: "{{ value_json.battery.softwarever }}"
+        icon: mdi:chip
+
+  # Live battery data (from getdevdata.cgi — poll every 30s)
+  - resource: "https://10.0.0.2/getdevdata.cgi?device=4&sn=OE012K01Z2610013"
+    verify_ssl: false
+    scan_interval: 30
+    sensor:
+      - name: "Battery Power Raw"
+        unique_id: "battery_power_raw"
+        value_template: "{{ value_json.pb | int }}"
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+      - name: "Battery SOC"
+        unique_id: "battery_soc_raw"
+        value_template: "{{ value_json.soc | int }}"
+        unit_of_measurement: "%"
+        device_class: battery
+        state_class: measurement
+
+  # Grid power (from smart meter)
+  - resource: "https://10.0.0.2/getdevdata.cgi?device=3"
+    verify_ssl: false
+    scan_interval: 30
+    sensor:
+      - name: "Grid Power Raw"
+        unique_id: "grid_power_raw"
+        value_template: "{{ value_json.pac | int }}"
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+      - name: "PV Meter Raw"
+        unique_id: "pv_meter_raw"
+        value_template: "{{ value_json.meter_general.prc | int }}"
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+
+  # Inverter data
+  - resource: "https://10.0.0.2/getdevdata.cgi?device=2&sn=OE012K01Z2610013"
+    verify_ssl: false
+    scan_interval: 30
+    sensor:
+      - name: "Inverter AC Power"
+        unique_id: "inverter_ac_power"
+        value_template: "{{ value_json.pac | int }}"
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+      - name: "Solar DC Voltage"
+        unique_id: "solar_dc_voltage"
+        value_template: "{{ value_json.vpv[0] | int }}"
+        unit_of_measurement: "V"
+
+# ─── Template sensors (derived calculations) ────────────────────────────────
+template:
+  - sensor:
+      - name: "Solar PV Power"
+        unique_id: "solar_pv_power_v3"
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        state: >
+          {% set vpv = states('sensor.solar_dc_voltage') | float(0) %}
+          {% set meter = states('sensor.pv_meter_raw') | float(0) %}
+          {% set bat = states('sensor.battery_power_raw') | float(0) %}
+          {% set bat_dis = [bat, 0] | max %}
+          {% if vpv < 50 %}
+            0
+          {% else %}
+            {{ [meter - bat_dis, 0] | max | round(0) }}
+          {% endif %}
+
+      - name: "Home Load Power"
+        unique_id: "home_load_power_calc"
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        state: >
+          {% set pv = states('sensor.solar_pv_power_3') | float(0) %}
+          {% set bat = states('sensor.battery_power_raw') | float(0) %}
+          {% set grid = states('sensor.grid_power_raw') | float(0) %}
+          {% set bat_dis = [bat, 0] | max %}
+          {% set bat_chg = [bat * -1, 0] | max %}
+          {% set grid_imp = [grid, 0] | max %}
+          {% set grid_exp = [grid * -1, 0] | max %}
+          {{ [pv + bat_dis + grid_imp - bat_chg - grid_exp, 0] | max | round(0) }}
+
+# ─── SmartShift shell commands ──────────────────────────────────────────────
+shell_command:
+  smartshift_run: "/ha-smartshift/scripts/run_smartshift.sh auto"
+  smartshift_charge: "/ha-smartshift/scripts/run_smartshift.sh charge"
+  smartshift_discharge: "/ha-smartshift/scripts/run_smartshift.sh discharge"
+  smartshift_self_consumption: "/ha-smartshift/scripts/run_smartshift.sh self_consumption"
+
+# ─── Command-line sensors for SmartShift state ──────────────────────────────
+command_line:
+  - sensor:
+      name: "SmartShift Spot Price"
+      unique_id: "smartshift_spot_price"
+      command: "cat /home/bowen/ha-smartshift/.current_state.json 2>/dev/null | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d['spot_price_ckwh'])\" 2>/dev/null || echo 0"
+      unit_of_measurement: "c/kWh"
+      device_class: monetary
+      scan_interval: 60
+      value_template: "{{ value | float(0) | round(3) }}"
+
+  - sensor:
+      name: "SmartShift Mode"
+      unique_id: "smartshift_mode"
+      command: "cat /home/bowen/ha-smartshift/.current_state.json 2>/dev/null | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d['action'])\" 2>/dev/null || echo unknown"
+      scan_interval: 60
+
+  - sensor:
+      name: "SmartShift Last Updated"
+      unique_id: "smartshift_last_updated"
+      command: "cat /home/bowen/ha-smartshift/.current_state.json 2>/dev/null | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d['timestamp'])\" 2>/dev/null || echo unknown"
+      scan_interval: 60

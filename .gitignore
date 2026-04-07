@@ -12,3 +12,4 @@ smartshift.log
 .current_state.json
 .ha_token
 .ha_refresh_token
+.ai_advice.json
