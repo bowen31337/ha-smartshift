@@ -141,5 +141,68 @@ command_line:
   - sensor:
       name: "SmartShift Last Updated"
       unique_id: "smartshift_last_updated"
-      command: "cat /home/bowen/ha-smartshift/.current_state.json 2>/dev/null | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d['timestamp'])\" 2>/dev/null || echo unknown"
+      command: "cat /home/bowen/ha-smartshift/.current_state.json 2>/dev/null | python3 -c \"import json,sys,datetime; d=json.load(sys.stdin); t=datetime.datetime.fromisoformat(d['timestamp']); t=t.astimezone(); print(t.strftime('%d %b %I:%M %p'))\" 2>/dev/null || echo unknown"
       scan_interval: 60
+
+  - sensor:
+      name: "SmartShift State: Action"
+      unique_id: "smartshift_state_action"
+      command: "cat /home/bowen/ha-smartshift/.current_state.json 2>/dev/null | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d.get('action','unknown'))\" 2>/dev/null || echo unknown"
+      scan_interval: 60
+      icon: mdi:lightning-bolt
+
+  - sensor:
+      name: "SmartShift State: Battery Power"
+      unique_id: "smartshift_state_battery_w"
+      command: "cat /home/bowen/ha-smartshift/.current_state.json 2>/dev/null | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d.get('battery_w',0))\" 2>/dev/null || echo 0"
+      unit_of_measurement: "W"
+      device_class: power
+      scan_interval: 60
+      value_template: "{{ value | int(0) }}"
+      icon: mdi:battery-charging
+
+  - sensor:
+      name: "SmartShift State: Grid Power"
+      unique_id: "smartshift_state_grid_w"
+      command: "cat /home/bowen/ha-smartshift/.current_state.json 2>/dev/null | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d.get('grid_w',0))\" 2>/dev/null || echo 0"
+      unit_of_measurement: "W"
+      device_class: power
+      scan_interval: 60
+      value_template: "{{ value | int(0) }}"
+      icon: mdi:transmission-tower
+
+  - sensor:
+      name: "SmartShift State: Export Today"
+      unique_id: "smartshift_state_export_today_kwh"
+      command: "cat /home/bowen/ha-smartshift/.current_state.json 2>/dev/null | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d.get('grid_export_today_kwh',0))\" 2>/dev/null || echo 0"
+      unit_of_measurement: "kWh"
+      device_class: energy
+      scan_interval: 60
+      value_template: "{{ value | float(0) | round(2) }}"
+      icon: mdi:transmission-tower-export
+
+  - sensor:
+      name: "SmartShift State: Import Today"
+      unique_id: "smartshift_state_import_today_kwh"
+      command: "cat /home/bowen/ha-smartshift/.current_state.json 2>/dev/null | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d.get('grid_import_today_kwh',0))\" 2>/dev/null || echo 0"
+      unit_of_measurement: "kWh"
+      device_class: energy
+      scan_interval: 60
+      value_template: "{{ value | float(0) | round(2) }}"
+      icon: mdi:transmission-tower-import
+
+  - sensor:
+      name: "SmartShift State: Solar Forecast"
+      unique_id: "smartshift_state_solar_forecast_kwh"
+      command: "cat /home/bowen/ha-smartshift/.current_state.json 2>/dev/null | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d.get('solar_forecast',{}).get('estimated_kwh','0'))\" 2>/dev/null || echo 0"
+      unit_of_measurement: "kWh"
+      scan_interval: 300
+      value_template: "{{ value | float(0) | round(1) }}"
+      icon: mdi:solar-power
+
+  - sensor:
+      name: "SmartShift State: Last Updated"
+      unique_id: "smartshift_state_last_updated"
+      command: "cat /home/bowen/ha-smartshift/.current_state.json 2>/dev/null | python3 -c \"import json,sys,datetime; d=json.load(sys.stdin); s=d.get('timestamp',''); t=datetime.datetime.fromisoformat(s) if s else None; print(t.astimezone().strftime('%d %b %I:%M %p') if t else 'never')\" 2>/dev/null || echo never"
+      scan_interval: 60
+      icon: mdi:clock-outline
