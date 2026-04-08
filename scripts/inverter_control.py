@@ -56,6 +56,9 @@ SOLAR_PRESERVE_HIGH = float(os.environ.get("SOLAR_PRESERVE_HIGH", "20")) # Solar
 SOC_MIN = float(os.environ.get("SOC_MIN", "5"))    # Never discharge below (overridden by BMS detection)
 SOC_MAX = float(os.environ.get("SOC_MAX", "95"))   # Never charge above
 
+# State file path (must be defined BEFORE referencing)
+STATE_FILE = os.environ.get("STATE_FILE", "/home/bowen/ha-smartshift/.current_state.json")
+
 # BMS floor auto-detection: the inverter firmware refuses discharge below a
 # certain SoC (typically 10%). The API doesn't expose this value, so we detect
 # it empirically: when discharge mode is active but bst=1 (standby) and pb≈0,
@@ -874,7 +877,7 @@ def decide_action(spot_price: float, soc: int, feed_in_price: float = 0.0) -> st
 
 
 def save_state(action: str, spot_price: float, soc: int, feed_in_price: float = 0.0,
-               grid_data: dict = None, battery_power: int = 0) -> None:
+               grid_data: dict = None, battery_power: int = 0, advisor_data: dict = None) -> None:
     """Save current state to a JSON file for HA sensor pickup."""
     state_file = os.environ.get(
         "STATE_FILE",
@@ -900,6 +903,26 @@ def save_state(action: str, spot_price: float, soc: int, feed_in_price: float = 
         },
         "solar_forecast": get_solar_forecast(),
     }
+    # Include AI advisor data if available
+    if advisor_data:
+        state["advisor"] = {
+            "strategy": advisor_data.get("strategy", "unknown"),
+            "export_threshold": advisor_data.get("export_threshold", 10.0),
+            "discharge_floor": advisor_data.get("discharge_floor", 5.0),
+            "hold_until": advisor_data.get("hold_until", ""),
+            "confidence": advisor_data.get("confidence", 0.0),
+            "reasoning": advisor_data.get("reasoning", ""),
+            "alerts": advisor_data.get("alerts", []),
+        }
+        # Also copy to .ai_advice.json for HA sensors
+        advice_file = os.environ.get("ADVICE_FILE", "/ha-smartshift/.ai_advice.json")
+        try:
+            advice_host_path = state_file.replace(".current_state.json", ".ai_advice.json")
+            with open(advice_host_path, "w") as f:
+                json.dump(advisor_data, f, indent=2)
+            log.info(f"AI advice copied to {advice_host_path}")
+        except Exception as e:
+            log.warning(f"Could not copy AI advice: {e}")
     try:
         with open(state_file, "w") as f:
             json.dump(state, f, indent=2)
@@ -972,9 +995,14 @@ def run(args) -> int:
     # Calculate adaptive power limits for logging
     adaptive = calc_adaptive_power(battery)
 
-    # Save state for HA sensors (now includes grid + battery power)
+    # Load AI advisor data for state file
+    advisor_data = _load_advice()
+    if advisor_data:
+        log.info(f"AI advisor included in state: strategy={advisor_data.get('strategy', 'unknown')}")
+
+    # Save state for HA sensors (now includes grid + battery power + advisor data)
     save_state(action, spot_price, soc, feed_in_price,
-               grid_data=grid, battery_power=power)
+               grid_data=grid, battery_power=power, advisor_data=advisor_data)
 
     # Apply the mode
     success = set_work_mode(action, dry_run=args.dry_run, battery=battery)
