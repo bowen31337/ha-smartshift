@@ -1,0 +1,39 @@
+{
+  "timestamp": "2026-04-11T22:57:42.330698",
+  "gpus": [
+    {
+      "index": 0,
+      "name": "RTX 3090",
+      "temp": 38,
+      "power": 23.0,
+      "util": 0,
+      "mem_used": 18449,
+      "mem_total": 24576,
+      "fan": 0
+    },
+    {
+      "index": 1,
+      "name": "RTX 3080",
+      "temp": 46,
+      "power": 22.5,
+      "util": 0,
+      "mem_used": 18,
+      "mem_total": 10240,
+      "fan": 0
+    },
+    {
+      "index": 2,
+      "name": "RTX 2070 SUPER",
+      "temp": 30,
+      "power": 7.1,
+      "util": 0,
+      "mem_used": 9,
+      "mem_total": 8192,
+      "fan": 24
+    }
+  ],
+  "total_power_w": 52.6,
+  "gpu_count": 3,
+  "miner_status": "failed",
+  "any_mining": false
+}
