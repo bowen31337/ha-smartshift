@@ -1,7 +1,0 @@
-[Unit]
-Description=Poll GPU stats from mining server
-After=network.target
-
-[Service]
-Type=oneshot
-ExecStart=/home/bowen/ha-smartshift/scripts/poll_gpu_stats.sh
