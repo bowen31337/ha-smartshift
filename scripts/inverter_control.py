@@ -57,7 +57,7 @@ SOC_MIN = float(os.environ.get("SOC_MIN", "5"))    # Never discharge below (over
 SOC_MAX = float(os.environ.get("SOC_MAX", "95"))   # Never charge above
 
 # State file path (must be defined BEFORE referencing)
-STATE_FILE = os.environ.get("STATE_FILE", "/home/bowen/ha-smartshift/.current_state.json")
+STATE_FILE = os.environ.get("STATE_FILE", "/ha-smartshift/.current_state.json")
 
 # BMS floor auto-detection: the inverter firmware refuses discharge below a
 # certain SoC (typically 10%). The API doesn't expose this value, so we detect
@@ -324,7 +324,7 @@ def get_battery_state() -> dict:
     except Exception as e:
         log.warning(f"Failed to get battery state: {e} — using last known SoC")
         # Fall back to last known SoC from state file
-        state_file = os.environ.get("STATE_FILE", "/home/bowen/ha-smartshift/.current_state.json")
+        state_file = os.environ.get("STATE_FILE", "/ha-smartshift/.current_state.json")
         try:
             with open(state_file) as f:
                 last = json.load(f)
@@ -881,7 +881,7 @@ def save_state(action: str, spot_price: float, soc: int, feed_in_price: float = 
     """Save current state to a JSON file for HA sensor pickup."""
     state_file = os.environ.get(
         "STATE_FILE",
-        "/home/bowen/ha-smartshift/.current_state.json"
+        "/ha-smartshift/.current_state.json"
     )
     grid = grid_data or {}
     state = {

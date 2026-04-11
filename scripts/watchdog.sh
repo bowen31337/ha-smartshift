@@ -6,8 +6,8 @@
 
 set -euo pipefail
 
-STATE_FILE="/home/bowen/ha-smartshift/.current_state.json"
-LOG_FILE="/home/bowen/ha-smartshift/watchdog.log"
+STATE_FILE="/ha-smartshift/.current_state.json"
+LOG_FILE="/ha-smartshift/watchdog.log"
 ALERT_LOCKFILE="/tmp/smartshift-watchdog-alerted"
 STALE_SECONDS=900  # 15 minutes
 
@@ -38,7 +38,7 @@ log() {
 }
 
 reset_inverter() {
-    cd /home/bowen/ha-smartshift
+    cd /ha-smartshift
     source .env 2>/dev/null || true
     uv run python scripts/inverter_control.py --mode self_consumption >> "$LOG_FILE" 2>&1
 }
