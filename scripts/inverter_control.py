@@ -438,6 +438,18 @@ def calc_adaptive_power(battery_data: dict) -> dict:
         pin_w = min(pin_w, int(INVERTER_MAX_W * 0.5))
         reasons.append(f"soc_cv_phase({soc}%)")
 
+    # POU cap: read max export power from advisor config
+    try:
+        _advice_path = os.environ.get("SMARTSHIFT_DIR", "/ha-smartshift") + "/.ai_advice.json"
+        _advice = json.loads(Path(_advice_path).read_text())
+        pou_max_kw = float(_advice.get("pou_max_kw", 10))
+        pou_cap_w = int(pou_max_kw * 1000)
+        if pout_w > pou_cap_w:
+            pout_w = pou_cap_w
+            reasons.append(f"pou_cap({pou_max_kw}kW)")
+    except Exception:
+        pass  # advice file not available — skip cap
+
     # Round to nearest 500W for clean API values
     pin_w = max(1000, (pin_w // 500) * 500)
     pout_w = max(1000, (pout_w // 500) * 500)
