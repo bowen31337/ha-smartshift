@@ -839,6 +839,11 @@ def decide_action(spot_price: float, soc: int, feed_in_price: float = 0.0) -> st
     if earn_now < export_threshold:
         return "self_consumption"
 
+    # --- AI advisor veto: if advisor says hold, don't discharge ---
+    if advice and advice.get("strategy") == "hold":
+        log.info("AI advisor says HOLD — overriding discharge decision")
+        return "self_consumption"
+
     # --- Weather-adjusted discharge floor ---
     solar = get_solar_forecast()
     discharge_floor = SOC_MIN  # default: drain to minimum (sunny assumption)
