@@ -294,11 +294,11 @@ def build_plan(
         "battery_available_kwh": round(available_kwh, 3),
         "battery_leftover_kwh": round(remaining_battery, 3),
     }
-    return {"intervals": intervals, "summary": summary}
+    return {"intervals": intervals, "summary": summary, "_export_threshold_c": export_threshold_c}
 
 
 # --- Immediate action decision ---------------------------------------------
-def decide_now(plan: dict, current_buy_c: float, current_feed_c: float, soc_pct: float) -> tuple[str, str, float]:
+def decide_now(plan: dict, current_buy_c: float, current_feed_c: float, soc_pct: float, export_threshold_c: float = EXPORT_THRESHOLD_DEFAULT) -> tuple[str, str, float]:
     intervals = plan.get("intervals", [])
     if not intervals:
         return "hold", "No forward price data — holding in self-consumption.", 0.4
@@ -313,7 +313,7 @@ def decide_now(plan: dict, current_buy_c: float, current_feed_c: float, soc_pct:
     if action == "export_peak":
         reasoning = (
             f"Export window NOW: feed-in {first['feed_c']:.2f}c ≥ threshold "
-            f"{EXPORT_THRESHOLD_DEFAULT:.1f}c. Discharging {first['energy_kwh']:.2f}kWh to grid."
+            f"{export_threshold_c:.1f}c. Discharging {first['energy_kwh']:.2f}kWh to grid."
         )
         return "export_peak", reasoning, 0.9
     if action == "discharge":
@@ -330,7 +330,7 @@ def decide_now(plan: dict, current_buy_c: float, current_feed_c: float, soc_pct:
 
     # HOLD — explain WHY (this is the key improvement vs v1)
     reason_parts = [
-        f"Current feed-in {current_feed_c:.2f}c below export threshold {EXPORT_THRESHOLD_DEFAULT:.1f}c."
+        f"Current feed-in {current_feed_c:.2f}c below export threshold {export_threshold_c:.1f}c."
     ]
     if next_export:
         local = datetime.fromisoformat(next_export["start"].replace("Z", "+00:00")) + SYDNEY_OFFSET
@@ -354,12 +354,19 @@ def main() -> int:
     profile = load_profile()
     soc_pct = fnum(ha_state("sensor.battery_soc"), 50.0)
 
-    # Respect the HA override for export threshold
     ha_override = fnum(ha_state("input_number.smartshift_export_price_override"), 0.0)
-    export_threshold = ha_override if ha_override > 0 else EXPORT_THRESHOLD_DEFAULT
 
+    # Compute adaptive export threshold from forward feed-in distribution
     forward = amber_forward_prices(next_intervals=48)
     print(f"Forward intervals: {len(forward)}")
+
+    feed_prices = sorted([r["feed_c"] for r in forward if r.get("feed_c", 0) > 0], reverse=True)
+    if len(feed_prices) >= 4 and ha_override <= 0:
+        # Use p80 of feed-in prices — only export when in top 20%
+        p80_idx = int(len(feed_prices) * 0.2)
+        export_threshold = max(3.0, feed_prices[p80_idx])
+    else:
+        export_threshold = ha_override if ha_override > 0 else EXPORT_THRESHOLD_DEFAULT
 
     plan = build_plan(forward, profile, soc_pct, export_threshold)
     PLAN_PATH.write_text(json.dumps(plan, indent=2))
@@ -367,7 +374,7 @@ def main() -> int:
     current_buy = fnum(forward[0]["buy_c"], 0.0) if forward else fnum(ha_state("sensor.smartshift_spot_price"), 0.0)
     current_feed = fnum(forward[0]["feed_c"], 0.0) if forward else 0.0
 
-    strategy, reasoning, confidence = decide_now(plan, current_buy, current_feed, soc_pct)
+    strategy, reasoning, confidence = decide_now(plan, current_buy, current_feed, soc_pct, export_threshold)
     summary = plan.get("summary", {})
 
     next_export = next((iv for iv in plan.get("intervals", []) if iv["action"] == "export_peak"), None)
