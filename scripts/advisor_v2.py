@@ -244,15 +244,7 @@ def build_plan(
             remaining_battery -= take
             reserved_for_load += take
 
-    # --- Export pass: only export when genuinely profitable vs holding for self-use
-    # Key insight: exporting 1kWh at 9c but buying it back at 24c = net LOSS.
-    # Only export when feed_in > avg buy price weighted by load-shortage.
-    future_buy_prices = [iv["buy_c"] for iv in intervals if iv["action"] == "hold"]
-    if future_buy_prices:
-        avg_future_buy = sum(future_buy_prices) / len(future_buy_prices)
-    else:
-        avg_future_buy = DISCHARGE_THRESHOLD  # fallback: assume expensive
-
+    # --- Export pass: allocate remaining battery to top feed-in windows
     feed_rank = sorted(range(len(intervals)), key=lambda i: intervals[i]["feed_c"], reverse=True)
     export_windows = 0
     exported_kwh = 0.0
@@ -260,19 +252,15 @@ def build_plan(
     for i in feed_rank:
         iv = intervals[i]
         if iv["action"] != "hold":
-            continue
-        # Only export if feed_in exceeds BOTH the threshold AND the avg future buy price
-        # (exporting for 9c when you'll buy back at 24c is a guaranteed loss)
+            continue  # already reserved
         if iv["feed_c"] < export_threshold_c:
-            break
-        if iv["feed_c"] < avg_future_buy:
-            continue  # would lose money vs holding for self-consumption
+            break  # below threshold, done
         cap = min(remaining_battery, max_kwh_per_interval)
         if cap <= 0:
             break
         iv["action"] = "export_peak"
         iv["energy_kwh"] = round(cap, 3)
-        earn = cap * iv["feed_c"]
+        earn = cap * iv["feed_c"]  # feed_c already in c/kWh, cap in kWh → cents
         expected_earn += earn
         exported_kwh += cap
         remaining_battery -= cap
