@@ -64,6 +64,7 @@ SOC_MAX = float(os.environ.get("SOC_MAX", "95.0"))
 DISCHARGE_FLOOR = float(os.environ.get("DISCHARGE_FLOOR", "20.0"))
 BATTERY_KWH = float(os.environ.get("BATTERY_KWH", "10.0"))
 BATTERY_W_MAX = float(os.environ.get("BATTERY_W_MAX", "5000.0"))
+POU_MAX_DEFAULT = float(os.environ.get("POU_MAX", "5.0"))  # kW max export
 
 SYDNEY_OFFSET = timedelta(hours=10)  # close enough; drift <1h
 
@@ -183,6 +184,7 @@ def build_plan(
     profile: dict,
     soc_pct: float,
     export_threshold_c: float,
+    pou_max_kw: float = POU_MAX_DEFAULT,
 ) -> dict:
     """Build a per-interval plan: charge/discharge/hold/export.
 
@@ -193,6 +195,7 @@ def build_plan(
     available_kwh = max(0.0, (soc_pct - DISCHARGE_FLOOR) / 100.0 * BATTERY_KWH)
     headroom_kwh = max(0.0, (SOC_MAX - soc_pct) / 100.0 * BATTERY_KWH)
     max_kwh_per_interval = BATTERY_W_MAX * 0.5 / 1000.0  # 30 min
+    max_export_kwh_per_interval = pou_max_kw * 0.5  # POU cap (kWh in 30min)
     today_solar_remaining = expected_solar_kwh_today_remaining()
 
     # Annotate each interval with expected load/solar
@@ -255,7 +258,7 @@ def build_plan(
             continue  # already reserved
         if iv["feed_c"] < export_threshold_c:
             break  # below threshold, done
-        cap = min(remaining_battery, max_kwh_per_interval)
+        cap = min(remaining_battery, max_export_kwh_per_interval)
         if cap <= 0:
             break
         iv["action"] = "export_peak"
@@ -368,7 +371,8 @@ def main() -> int:
     else:
         export_threshold = ha_override if ha_override > 0 else EXPORT_THRESHOLD_DEFAULT
 
-    plan = build_plan(forward, profile, soc_pct, export_threshold)
+    pou_max = fnum(ha_state("input_number.smartshift_pou_max"), POU_MAX_DEFAULT)
+    plan = build_plan(forward, profile, soc_pct, export_threshold, pou_max_kw=pou_max)
     PLAN_PATH.write_text(json.dumps(plan, indent=2))
 
     current_buy = fnum(forward[0]["buy_c"], 0.0) if forward else fnum(ha_state("sensor.smartshift_spot_price"), 0.0)
@@ -410,6 +414,7 @@ def main() -> int:
         "current_prices": {"buy_c": current_buy, "feed_c": current_feed},
         "soc_pct": soc_pct,
         "source": "advisor_v2",
+        "pou_max_kw": round(pou_max, 1),
     }
     ADVICE_PATH.write_text(json.dumps(advice, indent=2))
     print(f"\nStrategy: {strategy}   Confidence: {confidence}")
