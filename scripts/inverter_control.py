@@ -837,12 +837,14 @@ def decide_action(spot_price: float, soc: int, feed_in_price: float = 0.0) -> st
     earn_now = -feed_in_price
 
     if earn_now < export_threshold:
+        # Below threshold — advisor hold veto applies
+        if advice and advice.get("strategy") == "hold":
+            log.info(f"AI advisor says HOLD (earn={earn_now:.2f}c < {export_threshold}c) — respecting hold")
         return "self_consumption"
 
-    # --- AI advisor veto: if advisor says hold, don't discharge ---
+    # earn_now >= export_threshold — export is profitable, advisor hold veto does NOT override
     if advice and advice.get("strategy") == "hold":
-        log.info("AI advisor says HOLD — overriding discharge decision")
-        return "self_consumption"
+        log.info(f"AI advisor says HOLD but earn={earn_now:.2f}c ≥ {export_threshold}c threshold — overriding hold")
 
     # --- Weather-adjusted discharge floor ---
     solar = get_solar_forecast()

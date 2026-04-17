@@ -59,7 +59,13 @@
         state_class: measurement
       - name: "PV Meter Raw"
         unique_id: "pv_meter_raw"
-        value_template: "{{ value_json.meter_general.prc | int }}"
+        value_template: >
+          {% set vpv1 = states('sensor.solar_dc_voltage') | float(0) %}
+          {% if vpv1 < 50 %}
+            0
+          {% else %}
+            {{ value_json.meter_general.prc | default(0) | int }}
+          {% endif %}
         unit_of_measurement: "W"
         device_class: power
         state_class: measurement
